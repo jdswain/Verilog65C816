@@ -4,7 +4,7 @@
 #   make sim        build and run the SoC simulation (fast, accelerated baud)
 #   make real       same, but at the true 27 MHz / 115200 clock ratio
 #   make send S=dm  type a command into the monitor after boot
-#   make rom        rebuild fpga/rom/minimon.hex from the monitor sources
+#   make rom        rebuild fpga/rom/minimon.mem from the monitor sources
 #   make lint       elaborate the synthesis top-level
 #
 # Synthesis is driven from the Gowin IDE; see fpga/README.md for the file list
@@ -20,8 +20,8 @@ RTL      := $(ROOT)/cpu_65c816.v $(wildcard rtl/*.v)
 IFLAGS   := -Irtl
 TB       := sim/tb_soc.v sim/sdram_model.v sim/adb_kbd_model.v
 # Which image gets baked into the bitstream. Override to build a variant:
-#   make bit ROM=rom/memtest.hex
-ROM      ?= rom/minimon.hex
+#   make bit ROM=rom/memtest.mem
+ROM      ?= rom/minimon.mem
 # Memory map baked into the bitstream: 0 = minimon (8 KB ROM at $E000, 6551 at
 # $C000), 1 = Rockwell Forth (16 KB ROM at $C000, R6501 serial at $0015).
 MAP      ?= 0
@@ -76,9 +76,7 @@ lint: $(RTL) $(ROM_VH)
 # cwd in a 100-byte buffer, so it must run from the source directory and the
 # path to it must be short.
 rom:
-	cd $(MON_DIR) && $(AS816) -o minimon minimon.asm
-	python3 tools/asimg.py $(MON_DIR)/minimon $(MON_DIR)/minimon.lst rom/minimon.hex \
-	    --base 0xE000 --size 0x2000 --word 0xFFFC=0xE000 --width 16
+	cd $(MON_DIR) && $(AS816) -o $(CURDIR)/rom/minimon.mem minimon.asm
 
 # Assemble the Rockwell Forth (kernel $F000-$FFFF + development $C000-$DFFF)
 # and lay both into one 16 KB image at $C000.
@@ -90,35 +88,33 @@ FORTH_SRC ?= $(HOME)/Developer/1av/65/RockwellForth/src
 FORTH_MACHINE ?= T20K
 FORTH_MAP     ?= 0
 forth:
-	cd $(FORTH_SRC) && $(AS816) -o ForthDevelopment-$(FORTH_MACHINE) -Dmachine='"$(FORTH_MACHINE)"' ForthDevelopment.asm
-	python3 tools/elf2hex.py $(FORTH_SRC)/ForthDevelopment-$(FORTH_MACHINE) rom/forth.hex \
-	    --base 0xC000 --size 0x4000 --sections kernel,development \
-	    --expect 0xC000=0x5A --expect 0xC001=0xA5 --width 16
+	cd $(FORTH_SRC) && $(AS816) -o $(CURDIR)/rom/forth.mem -Dmachine='"$(FORTH_MACHINE)"' ForthDevelopment.asm
 
 # Build the Forth bitstream: 16 KB ROM at $C000.
 forth-bit:
-	$(MAKE) bit ROM=rom/forth.hex MAP=$(FORTH_MAP) ROM_BITS=14 ROM_BASE="16'hC000"
+	$(MAKE) bit ROM=rom/forth.mem MAP=$(FORTH_MAP) ROM_BITS=14 ROM_BASE="16'hC000"
 
 # The SDRAM exerciser. Self-contained: its macro include lives in rom/.
 memtest:
-	cd rom && $(AS816) -o memtest memtest.asm
-	python3 tools/asimg.py rom/memtest rom/memtest.lst rom/memtest.hex \
-	    --base 0xE000 --size 0x2000 --word 0xFFFC=0xE000 --width 16
+	cd rom && $(AS816) -o memtest.mem memtest.asm
 
 # The ADB and framebuffer exercisers.
 adbtest fbtest maptest imgload texttest blttest:
-	cd rom && $(AS816) -o $@ $@.asm
-	python3 tools/asimg.py rom/$@ rom/$@.lst rom/$@.hex \
-	    --base 0xE000 --size 0x2000 --word 0xFFFC=0xE000 --width 16
+	cd rom && $(AS816) -o $@.mem $@.asm
 
 # Show a picture on the display: convert it, then program the already-built
 # imgload bitstream and send the picture over the serial port (~14 s).
-#   make imgload && make bit ROM=rom/imgload.hex && make show
+#   make imgload && make bit ROM=rom/imgload.mem && make show
 # This deliberately does not depend on $(BIT), which would rebuild it around
 # whatever ROM is the default.
-IMG ?= img/lena.png
+# IMG_DISPLAY is the shape of the monitor: 16:9 for a widescreen that stretches
+# the 640x480 picture to fill the screen, 4:3 for one that keeps it square.
+IMG ?= img/nextcube.png
+IMG_DISPLAY ?= 16:9
+IMG_BACK ?= edge
 image:
-	python3 tools/mkimage.py $(IMG) $(IMG:.png=.fb) --preview $(IMG:.png=_preview.png)
+	python3 tools/mkimage.py $(IMG) $(IMG:.png=.fb) --preview $(IMG:.png=_preview.png) \
+	    --display $(IMG_DISPLAY) --background $(IMG_BACK)
 
 show: image
 	python3 tools/board.py load $(BIT) $(IMG:.png=.fb)
@@ -129,21 +125,17 @@ font:
 
 # The ROM/RAM soft switch exerciser.
 romswitch:
-	cd rom && $(AS816) -o romswitch romswitch.asm
-	python3 tools/asimg.py rom/romswitch rom/romswitch.lst rom/romswitch.hex \
-	    --base 0xE000 --size 0x2000 --word 0xFFFC=0xE000 --width 16
+	cd rom && $(AS816) -o romswitch.mem romswitch.asm
 
 # The external-bus exerciser.
 exttest:
-	cd rom && $(AS816) -o exttest exttest.asm
-	python3 tools/asimg.py rom/exttest rom/exttest.lst rom/exttest.hex \
-	    --base 0xE000 --size 0x2000 --word 0xFFFC=0xE000 --width 16
+	cd rom && $(AS816) -o exttest.mem exttest.asm
 
 # $readmemh resolves relative to the tool's working directory, and Gowin runs
 # synthesis from impl/gwsynthesis/, so the path has to be absolute.
 #
 # This is always regenerated rather than being timestamp-driven: its contents
-# depend on the ROM *variable*, so `make bit ROM=other.hex` followed by a plain
+# depend on the ROM *variable*, so `make bit ROM=other.mem` followed by a plain
 # `make bit` would otherwise leave a newer-looking file still naming the old
 # image and quietly build the wrong ROM into the bitstream. It only replaces
 # the file when the contents actually change, so nothing rebuilds needlessly.

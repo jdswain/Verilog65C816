@@ -21,9 +21,8 @@
 
 	include "mon-fixes/65816.asm"
 
-	section text
+	section "text"
 	org=$e000
-	entry start
 
 	ser_base   = $0200
 	ser_data   = ser_base + 0
@@ -189,3 +188,8 @@ str_check text.0 "verifying... "
 str_pass  text.0 "PASS",$0d,$0a
 str_fail  text.0 "FAIL at "
 str_crlf  text.0 $0d,$0a
+
+	;; Reset vector, and IRQ/BRK in emulation mode
+	org=$fffc
+	data.w start
+	data.w start

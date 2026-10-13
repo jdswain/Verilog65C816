@@ -20,9 +20,8 @@
 
 	include "mon-fixes/65816.asm"
 
-	section text
+	section "text"
 	org=$e000
-	entry start
 
 	ser_base   = $0200
 	ser_data   = ser_base + 0
@@ -265,3 +264,8 @@ str_copy  text.0 "unaligned copy: "
 str_ok    text.0 "ok",$0d,$0a
 str_fail  text.0 "FAIL",$0d,$0a
 str_done  text.0 "picture drawn",$0d,$0a
+
+	;; Reset vector, and IRQ/BRK in emulation mode
+	org=$fffc
+	data.w start
+	data.w start

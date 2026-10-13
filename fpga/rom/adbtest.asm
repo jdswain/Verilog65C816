@@ -9,9 +9,8 @@
 
 	include "mon-fixes/65816.asm"
 
-	section text
+	section "text"
 	org=$e000
-	entry start
 
 	ser_base   = $0200
 	ser_data   = ser_base + 0
@@ -109,3 +108,8 @@ str_to    text.0 " timeout, "
 str_resp  text.0 " responded, "
 str_bytes text.0 " bytes: "
 str_crlf  text.0 $0d,$0a
+
+	;; Reset vector, and IRQ/BRK in emulation mode
+	org=$fffc
+	data.w start
+	data.w start

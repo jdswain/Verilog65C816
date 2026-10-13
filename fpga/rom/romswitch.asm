@@ -12,9 +12,8 @@
 
 	include "mon-fixes/65816.asm"
 
-	section text
+	section "text"
 	org=$e000
-	entry start
 
 	ser_base   = $0200
 	ser_data   = ser_base + 0
@@ -129,3 +128,8 @@ str_ramval text.0 "probe with RAM in   = "
 str_back   text.0 "probe with ROM back = "
 str_done   text.0 "done",$0d,$0a
 str_crlf   text.0 $0d,$0a
+
+	;; Reset vector, and IRQ/BRK in emulation mode
+	org=$fffc
+	data.w start
+	data.w start

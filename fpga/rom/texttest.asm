@@ -17,9 +17,8 @@
 
 	include "mon-fixes/65816.asm"
 
-	section text
+	section "text"
 	org=$e000
-	entry start
 
 	ser_base   = $0200
 	ser_data   = ser_base + 0
@@ -176,3 +175,8 @@ str_title text.0 "65C816 SoC on the Tang Nano 20K -- 80 x 30 text, Atari ST 8x16
 str_fox   text.0 "The quick brown fox jumps over the lazy dog 0123456789"
 str_foot  text.0 "Character at even address, attribute at odd: low nibble ink, high nibble paper."
 str_done  text.0 "text mode on",$0d,$0a
+
+	;; Reset vector, and IRQ/BRK in emulation mode
+	org=$fffc
+	data.w start
+	data.w start

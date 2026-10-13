@@ -11,9 +11,8 @@
 
 	include "mon-fixes/65816.asm"
 
-	section text
+	section "text"
 	org=$e000
-	entry start
 
 	ser_base   = $0200
 	ser_data   = ser_base + 0
@@ -123,3 +122,8 @@ phn_out	jmp putc
 str_pal   text.0 "palette ramp, "
 str_hello text.0 "framebuffer fill: "
 str_done  text.0 "done",$0d,$0a
+
+	;; Reset vector, and IRQ/BRK in emulation mode
+	org=$fffc
+	data.w start
+	data.w start

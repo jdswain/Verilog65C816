@@ -443,25 +443,34 @@ the SD or LED pins without touching anything in use.
 
 ### Writing ROM sources against this map
 
-ROM sources assemble at `org=$e000` and are built into an 8 KB image with
+ROM sources assemble at `org=$e000` and are built straight into the ROM image
+by the 65Tools assembler, whose `.mem` output is a Verilog memory file:
 
 ```
-tools/asimg.py <elf> <lst> <out.hex> --base 0xE000 --size 0x2000 \
-    --word 0xFFFC=0xE000 --width 16
+as -o rom/name.mem name.asm
 ```
 
-The `--width 16` matters: the ROM is 16 bits wide, so the hex is little-endian
-words, not bytes. `ROM_BITS`/`ROM_BASE` in the Makefile must agree with
-`--size`/`--base` or the reset vector lands outside the loaded image and the
-CPU fetches `x` -- the failure looks like a completely dead SoC.
+The file holds the bytes of the program in order from its lowest address,
+with `$FF` in the gaps and no addresses, and `soc.v` reads it into an array
+that starts at the base of the ROM. So the first thing in the source must be
+at the ROM's base, and the source ends with its own vectors:
 
-Two assembler traps that have already cost time here:
+```
+	org=$fffc
+	data.w start		; reset
+	data.w start		; IRQ/BRK in emulation mode
+```
+
+The first line of the file is a comment with the range it covers
+(`// $E000-$FFFF`), which must agree with `ROM_BITS`/`ROM_BASE` in the
+Makefile. If it does not, the reset vector is not where the CPU looks and the
+failure looks like a completely dead SoC.
+
+An assembler trap that has already cost time here:
 
 * `sta $0000,x` assembles as **direct page** (`$95`) and always addresses bank
   0, ignoring DBR. Use the `.w` suffix (`$9D`) for absolute indexed. `!$0000`
   does not help -- it parses as an operator and silently yields `sta $01,x`.
-* An **undefined branch target emits nothing at all**. The signature in the
-  `.lst` is a label line with no bytes against it.
 
 ### Checking the map
 
@@ -580,28 +589,13 @@ input is the fix when that starts to matter.
 make rom MON_DIR=/path/to/mon/src
 ```
 
-This assembles the monitor and converts it into `rom/minimon.hex`.
+This assembles the monitor into `rom/minimon.mem`.
 
-Two things about the 65Tools assembler are worth knowing, because both fail
-confusingly:
-
-* It stores the working directory in a 100-byte buffer, so it must be run from
-  the source directory (`make rom` does) **and the absolute path to that
-  directory must be under 100 characters**. A longer path fails at EOF with
-  "Failed to change directory when closing file" and silently writes an empty
-  ELF.
-* A branch to an undefined symbol assembles to *nothing* -- no bytes, no error.
-  Check the `.lst` file if a routine misbehaves; a label line with no bytes
-  beside it is the signature. This is what made the transmitter drop every
-  other character before the fix in `rom/mon-fixes/`.
-
-`tools/asimg.py` builds the image from the ELF *and* the listing, because
-neither is sufficient alone: the ELF's `sh_offset` values are wrong (the `dp`
-section writes bytes while reporting `sh_size == 0`, shifting everything after
-it), and the listing truncates each line's byte column to six bytes, so longer
-`text.0` strings are incomplete in it. The tool takes the address range from
-the listing and the bytes from the ELF, locating the code from the end of the
-file.
+The sources are in the syntax of the current (Oberon) 65Tools assembler:
+section names are quoted (`section "text"`), there is no `entry` directive, and
+an undefined symbol is an error. The older C assembler accepted a branch to an
+undefined symbol and assembled it to nothing, which is what made the
+transmitter drop every other character before the fix in `rom/mon-fixes/`.
 
 ## Monitor fixes required
 
@@ -853,7 +847,7 @@ SDRAM model with a known framebuffer and checks all 640 pixels of a line.
 `sim/tb_video_text.v` does the same for text mode, but checks a whole frame --
 all 307,200 pixels -- against the font image, since the likely faults there are
 per-row. `rom/texttest.asm` draws the full character set and all 16 colours
-from the CPU (`make texttest && make bit ROM=rom/texttest.hex && make prog`).
+from the CPU (`make texttest && make bit ROM=rom/texttest.mem && make prog`).
 
 `test/hdmitest.v` is the bring-up ladder rung for video: colour bars straight
 from the timing generator, no SDRAM and no CPU, proving clocks, encoding,
@@ -866,15 +860,22 @@ palette, then the framebuffer -- and prints a 16-bit checksum that the host
 compares with its own:
 
 ```sh
-make imgload && make bit ROM=rom/imgload.hex    # once
-make show                                       # img/lena.png, ~14 s to send
+make imgload && make bit ROM=rom/imgload.mem    # once
+make show                                       # img/nextcube.png, ~14 s to send
 make show IMG=img/other.png                     # any 8-bit PNG
+make show IMG_DISPLAY=4:3 IMG_BACK=000000       # square pixels, black surround
 ```
 
 `tools/mkimage.py` does the conversion with the standard library alone: scale to
-fit 640x480 on a black border, median-cut to 15 colours plus black, and
-Floyd-Steinberg dither. It also writes `*_preview.png`, which is what the
-display should show.
+fit 640x480, median-cut to 15 colours plus black, and Floyd-Steinberg dither.
+It also writes `*_preview.png`, which is what is in the framebuffer.
+
+Two settings shape the result. `IMG_DISPLAY` is the shape of the monitor: the
+default, `16:9`, is for a widescreen that stretches the 640x480 picture to fill
+its screen, so the picture is stored narrower than it should look (and the
+preview looks narrow too). Use `4:3` for a monitor that keeps the pixels
+square. `IMG_BACK` is the colour around the picture: `edge`, the default, takes
+it from the picture's top left corner, or give it as `RRGGBB`.
 
 ## Monitor commands
 
@@ -1112,7 +1113,7 @@ held word, a different line in the same set (which must not be evicted), and
 40 rounds of a write racing a CPU read at every phase offset.
 
 `rom/blttest.asm` runs on the board (`make blttest && make bit
-ROM=rom/blttest.hex && make prog`). It fills over bytes the CPU has just read
+ROM=rom/blttest.mem && make prog`). It fills over bytes the CPU has just read
 -- so they are cached and the last is the held word -- and checks the CPU reads
 the fill back; with the invalidation disconnected that test fails. Then an
 unaligned copy checked byte for byte, then a picture: blue screen, 16 colour
@@ -1139,9 +1140,10 @@ where the cache's held word gives a 1-cycle hit anyway, so the ROM was the
 right place to give the cycle back. `rom_hit`/`rom_fast` are still in `soc.v`,
 tied to 0.
 
-Images must therefore be built with `--width 16`, which emits 16-bit
-little-endian words instead of bytes; `make rom`, `make memtest` and `make
-forth` all do.
+The image itself is byte-wide: `soc.v` reads a word as its two bytes, and the
+synthesiser builds the 16-bit read out of block RAM. That takes more blocks
+than a word-wide image did (11 ROM blocks against 7 with the 16 KB Forth
+ROM), with no change in timing.
 
 ## Apple Desktop Bus
 
@@ -1357,7 +1359,7 @@ here: the `!` is parsed as an operator, quietly yielding `sta $01,x`.
 
 ```sh
 make memtest                  # assemble rom/memtest.asm
-make bit ROM=rom/memtest.hex  # bake it in
+make bit ROM=rom/memtest.mem  # bake it in
 make boot                     # run it
 ```
 

@@ -19,6 +19,6 @@ impl/
 # FPGA ROMs: keep the sources, and the two images whose source is elsewhere
 /fpga/rom/*
 !/fpga/rom/*.asm
-!/fpga/rom/minimon.hex
+!/fpga/rom/minimon.mem
 !/fpga/rom/font_st8x16.hex
 !/fpga/rom/mon-fixes/

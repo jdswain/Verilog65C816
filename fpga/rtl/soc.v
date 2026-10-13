@@ -59,7 +59,7 @@
 `default_nettype none
 
 module soc #(
-    parameter         ROM_HEX   = "rom.hex",
+    parameter         ROM_HEX   = "rom.mem",
     // Text-mode font. Like ROM_HEX this is resolved against the tool's working
     // directory; the default suits simulation from the repository root, and the
     // top level overrides it with an absolute path for synthesis.
@@ -304,22 +304,25 @@ module soc #(
     // Boot ROM, 16 bits wide.
     //
     // The width halves the number of block RAM accesses an instruction fetch
-    // needs, and costs nothing (8 KB is 4 blocks either way). It was briefly
+    // needs. It was briefly
     // paired with a held-word buffer that answered the second byte of a word in
     // a single cycle, but that put a tag comparator in front of the CPU's ALU
     // and became the critical path -- see the note below. Read data now comes
     // straight off the block RAM output register.
     //
-    // The image is loaded as 16-bit little-endian words, which is why the ROM
-    // hex files are built with `--width 16`.
+    // The image is a byte-wide memory file (`as -o rom.mem`): the bytes of
+    // the ROM in order from its base, with no addresses in it. A word is read
+    // as its two bytes.
     //------------------------------------------------------------------
-    localparam integer ROM_WORDS = (1 << (ROM_BITS - 1));
+    localparam integer ROM_BYTES = (1 << ROM_BITS);
 
-    reg [15:0] rom [0:ROM_WORDS-1];
+    reg [7:0] rom [0:ROM_BYTES-1];
     initial $readmemh(ROM_HEX, rom);
 
+    wire [ROM_BITS-1:0] rom_even = {addr[ROM_BITS-1:1], 1'b0};
+
     reg [15:0] rom_q;
-    always @(posedge clk) rom_q <= rom[addr[ROM_BITS-1:1]];
+    always @(posedge clk) rom_q <= {rom[rom_even | 1'b1], rom[rom_even]};
 
     // Straight off the block RAM output register, then a 2:1 byte select --
     // by the address bit as it was in the strobe cycle (see the read mux).

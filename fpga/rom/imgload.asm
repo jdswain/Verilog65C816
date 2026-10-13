@@ -17,9 +17,8 @@
 
 	include "mon-fixes/65816.asm"
 
-	section text
+	section "text"
 	org=$e000
-	entry start
 
 	ser_base   = $0200
 	ser_data   = ser_base + 0
@@ -125,3 +124,8 @@ phn_out	jmp putc
 str_ready text.0 "ready",$0d,$0a
 str_sum   text.0 "sum="
 str_crlf  text.0 $0d,$0a
+
+	;; Reset vector, and IRQ/BRK in emulation mode
+	org=$fffc
+	data.w start
+	data.w start

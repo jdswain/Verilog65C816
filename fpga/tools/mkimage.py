@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Convert a PNG into an image file for rom/imgload.asm.
 
-    mkimage.py in.png out.fb [--preview out.png]
+    mkimage.py in.png out.fb [--preview out.png] [--display 16:9] [--background edge]
 
-The picture is scaled to fit 640x480 (keeping its shape, centred on black),
-reduced to 16 colours by median cut and Floyd-Steinberg dithered. Palette
-entry 0 is always black, for the border; the other 15 are chosen from the
-picture.
+The picture is scaled to fit 640x480 (keeping its shape, centred on a
+background colour), reduced to 16 colours by median cut and Floyd-Steinberg
+dithered. Palette entry 0 is always black, for the border; the other 15 are
+chosen from the picture. --display allows for a monitor that stretches the
+picture, --background sets the colour around it.
 
 Output layout, exactly what the ROM expects to receive:
 
@@ -157,21 +158,45 @@ def main():
     ap.add_argument('src')
     ap.add_argument('out')
     ap.add_argument('--preview', help='also write the result as a PNG')
+    ap.add_argument('--display', default='4:3', metavar='W:H',
+                    help='shape of the screen the 640x480 picture is shown on. '
+                         'A 16:9 monitor that stretches the picture to fill '
+                         'the screen makes the pixels wider than tall; say '
+                         '16:9 and the picture is narrowed to compensate')
+    ap.add_argument('--background', default='000000', metavar='RRGGBB|edge',
+                    help="colour around the picture; 'edge' takes it from the "
+                         "picture's top left corner")
     a = ap.parse_args()
 
     w, h, rows = read_png(a.src)
-    scale = min(W / w, H / h)
-    nw, nh = min(W, round(w * scale) & ~1), min(H, round(h * scale))
+    dw, _, dh = a.display.partition(':')
+    par = (float(dw) / float(dh)) / (W / H)        # width of a pixel / its height
+    scale = min(W * par / w, H / h)
+    nw, nh = min(W, round(w * scale / par) & ~1), min(H, round(h * scale))
     pic = resize(w, h, rows, nw, nh)
 
-    palette = [(0, 0, 0)] + median_cut([px for row in pic for px in row], 15)
+    if a.background == 'edge':
+        back = tuple(rows[0][0])
+    else:
+        back = tuple(bytes.fromhex(a.background))
+
+    # Entry 0 is black. The background needs an exact entry of its own, or the
+    # dither would speckle it: reuse the nearest picked colour if it is close.
+    pixels = [px for row in pic for px in row]
+    dist = lambda p: sum((p[c] - back[c]) ** 2 for c in range(3))
+    palette = [(0, 0, 0)] + median_cut(pixels, 15)
+    bi = min(range(len(palette)), key=lambda i: dist(palette[i]))
+    if dist(palette[bi]) > 3 * 8 ** 2:
+        palette = [(0, 0, 0)] + median_cut(pixels, 14) + [back]
+        bi = len(palette) - 1
+    palette[bi] = back
     palette += [(0, 0, 0)] * (16 - len(palette))
     idx = dither(pic, palette)
 
-    # Centre on a black (index 0) screen. x0 is even, so a byte never straddles
-    # the picture's edge.
+    # Centre on the background. x0 is even, so a byte never straddles the
+    # picture's edge.
     x0, y0 = ((W - nw) // 2) & ~1, (H - nh) // 2
-    screen = [[0] * W for _ in range(H)]
+    screen = [[bi] * W for _ in range(H)]
     for y in range(nh):
         screen[y0 + y][x0:x0 + nw] = idx[y]
 

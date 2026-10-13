@@ -22,7 +22,7 @@
 
 	;; Register definitions
 
-	section dp
+	section "dp"
 	
 	org = 0			;Actually Direct Page
 

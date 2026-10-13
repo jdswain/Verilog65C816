@@ -24,7 +24,7 @@ module tb_soc #(
     // gap overruns the ACIA's single receive register -- which is what a real
     // terminal paste does too. A human typing leaves a gap this wide.
     parameter integer TYPE_GAP = 30,
-    parameter         ROM_HEX   = "fpga/rom/minimon.hex",
+    parameter         ROM_HEX   = "fpga/rom/minimon.mem",
     parameter integer MAP       = 0,
     // Must match the Makefile's defaults. These were left at the old 8 KB
     // ROM at $E000 when the I/O block took $E000 and the ROM moved to $F000,
