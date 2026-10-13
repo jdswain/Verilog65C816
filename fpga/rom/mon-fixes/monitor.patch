@@ -1,0 +1,956 @@
+diff -uN a/command.asm b/command.asm
+--- a/command.asm	2026-10-13 16:30:40
++++ b/command.asm	2026-10-13 19:09:17
+@@ -2,45 +2,143 @@
+ * Monitor commands					   *
+ ************************************************************
+ 
+-	;; Display Memory
+-	;; X - Start address
+-	;; Y - Number of bytes
+-cmd_dm:		jsr prn_newline
+-		jsr dm_pr_w
++	;; dm addr [count] - display memory
++	;;
++	;; 16 bytes to a line: the address, the bytes in hex, then the same
++	;; bytes as characters with anything unprintable shown as a dot.
++cmd_dm:		jsr getaddr
++		bcs dm_count
++		brl interp_bad
++dm_count:	long_a
++		lda #dm_default
++		sta mon_cnt
++		short_a
++		jsr gethex
++		bcc dm_check
++		lda mon_num
++		sta mon_cnt
++		lda mon_num+1
++		sta mon_cnt+1
++		ora mon_cnt
++		bne dm_check
++		brl interp_bad		;a count of zero
++dm_check:	jsr ateol
++		bcs dm_line
++		brl interp_bad
++
++dm_line:	jsr prn_newline
++		lda mon_addr+2
++		jsr prn_hex
++		lda mon_addr+1
++		jsr prn_hex
++		lda mon_addr
++		jsr prn_hex
+ 		lda #':'
+-		jsr ser_putc
+-		lda #' '
+-		jsr ser_putc
+-dm_loop:	lda.w 0,x
++		jsr con_putc
++		ldy #0
++dm_byte:	lda #' '
++		jsr con_putc
++		cpy #8
++		bne dm_byte1
++		lda #' '		;a gap between the two halves
++		jsr con_putc
++dm_byte1:	lda [mon_addr],y
+ 		jsr prn_hex
+-		lda #' '
+-		jsr ser_putc
+-		inx
+-		dey
+-		cpy #$00
+-		beq dm_done
+-		tya
+-		and #$07
+-		bne nospace
+-		lda #' '
+-		jsr ser_putc
+-nospace:	tya
+-		and #$0F
+-		bne dm_loop
+-		bra cmd_dm
+-dm_done:	rts
+-	
+-	;; Prints word value in X
+-dm_pr_w:	phx
++		iny
+ 		long_a
+-		txa
+-		ldx #$08
+-l1:		lsr
+-		dex
+-		bne l1
++		dec mon_cnt
++		short_a			;leaves the Z flag alone
++		beq dm_last
++		cpy #16
++		bne dm_byte
++		jsr dm_text
++		clc
++		lda mon_addr
++		adc #16
++		sta mon_addr
++		bcc dm_line
++		inc mon_addr+1
++		bne dm_line
++		inc mon_addr+2
++		bra dm_line
++dm_last:	jmp dm_text
++
++	;; Prints the Y bytes at mon_addr as characters, after padding a
++	;; short line out so the column stays aligned.
++dm_text:	sty mon_tmp
++dm_pad:		cpy #16
++		beq dm_text1
++		lda #' '
++		jsr con_putc
++		jsr con_putc
++		jsr con_putc
++		cpy #8
++		bne dm_pad1
++		jsr con_putc
++dm_pad1:	iny
++		bra dm_pad
++dm_text1:	lda #' '
++		jsr con_putc
++		jsr con_putc
++		ldy #0
++dm_text2:	lda [mon_addr],y
++		cmp #$20
++		bcc dm_dot
++		cmp #$7f
++		bcc dm_text3
++dm_dot:		lda #'.'
++dm_text3:	jsr con_putc
++		iny
++		cpy mon_tmp
++		bne dm_text2
++		rts
++
++	;; sm addr byte ... - set memory
++	;;
++	;; Stores each byte in turn, so a line that goes wrong part-way has
++	;; already written what came before the mistake.
++cmd_sm:		jsr getaddr
++		bcc sm_bad
++		jsr gethex		;there must be at least one byte
++		bcc sm_bad
++sm_store:	lda mon_num+1
++		ora mon_num+2
++		bne sm_bad		;more than two digits
++		lda mon_num
++		ldy #0
++		sta [mon_addr],y
++		inc mon_addr
++		bne sm_next
++		inc mon_addr+1
++		bne sm_next
++		inc mon_addr+2
++sm_next:	jsr gethex
++		bcs sm_store
++		jsr ateol
++		bcc sm_bad
++		rts
++sm_bad:		brl interp_bad
++
++	;; go addr - call code
++	;;
++	;; The code is entered with a long call, in native mode with an 8 bit
++	;; accumulator and 16 bit index registers, and gets back to the monitor
++	;; with RTL. Whatever state it returns in, the monitor puts its own
++	;; modes, data bank and direct page back.
++cmd_go:		jsr getaddr
++		bcc sm_bad
++		jsr ateol
++		bcc sm_bad
++		phk			;return address for RTL: bank, then PC-1
++		pea.w go_back-1
++		jmp [mon_addr]
++go_back:	native
+ 		short_a
+-		jsr prn_hex
+-		plx
+-		txa
+-		jmp prn_hex
+-		
++		long_i
++		lda #0
++		pha
++		pha
++		pld			;direct page 0
++		pha
++		plb			;data bank 0
++		rts
+diff -uN a/console.asm b/console.asm
+--- a/console.asm	2026-10-13 16:30:40
++++ b/console.asm	2026-10-13 19:09:17
+@@ -1,14 +1,433 @@
+ ********************************************************************************
+-* Console driver, includes VT100 commands                                      *
++* Console driver                                                               *
++*                                                                              *
++* Output goes to both the serial port and the 80x30 text display. Input comes  *
++* from the serial port or an ADB keyboard, whichever has something first.      *
++*                                                                              *
++* The display side understands the characters and VT100 sequences the monitor  *
++* itself sends, and nothing more:                                              *
++*                                                                              *
++*   CR, LF, BS        carriage return, line feed (scrolls), cursor left        *
++*   ESC [ n A/B/C/D   cursor up/down/right/left (always by one)                *
++*   ESC [ K           clear to end of line                                     *
++*   any other ESC [   swallowed, so it does not print as garbage               *
++*                                                                              *
++* The screen is 30 rows of 80 cells at $700000, two bytes per cell: character  *
++* then attribute (low nibble ink, high nibble paper). The cursor is a cell     *
++* with its attribute inverted; it is taken off before every character and put  *
++* back afterwards, so nothing else has to know it is there.                    *
++*                                                                              *
++* Scrolling and clearing the screen are done by the blitter. Its addresses are *
++* in pixels -- byte address times two -- so the screen is at $E00000 and a row *
++* of 160 bytes is 320 pixels.                                                  *
++*                                                                              *
++* The keyboard is polled with Talk register 0 to device 2 while con_getc is    *
++* waiting. Polling never blocks: a transaction takes a couple of milliseconds, *
++* which is 25 character times at 115200 baud, so the loop keeps watching the   *
++* serial port while one is in flight and collects the answer when it is done.  *
++* An answer is used only if it is a clean two-byte packet -- with no keyboard  *
++* attached the bus input floats, and noise must not turn into keystrokes.      *
+ ********************************************************************************
+ 
+-con_init	rts
++		vid_mode  = $0380	;bit 0: 1 = text mode
+ 
+-	;; Character returned in A
+-con_getc	
++		con_ptr   = $0040	;24 bit pointer to the screen
++		con_col   = $0046	;16 bit, 0..79
++		con_row   = $0048	;16 bit, 0..29
++		con_pos   = $004a	;16 bit offset of the cursor cell
++		con_tmp   = $004c	;16 bit scratch
++		con_state = $004e	;0 normal, 1 after ESC, 2 after ESC [
++		con_char  = $004f
++
++		kbd_pend  = $0050	;bytes of an ESC [ x sequence still to return
++		kbd_final = $0051	;its final letter
++		kbd_next  = $0052	;second event of a packet, $ff if none
++		kbd_mods  = $0053	;modifier keys held, kbd_m_* bits
++		kbd_busy  = $0054	;non-zero: a poll is in flight
++		kbd_code  = $0056	;16 bit: key code, for use as an index
++		kbd_event = $0058
++
++		blt_base   = $03c0	;blitter registers, 19 bytes
++		blt_ctrl   = blt_base + $12	;read: bit 7 = busy
++
++		adb_base   = $0280
++		adb_cmd    = adb_base + 0	;write starts a transaction
++		adb_status = adb_base + 1	;busy, done, timeout, srq, count[3:0]
++		adb_ctrl   = adb_base + 3	;read: bit 0 = collision
++		adb_data   = adb_base + 8
++
++		adb_talk0  = $2c	;device 2, Talk, register 0
++
++		kbd_m_lshift = $01
++		kbd_m_rshift = $02
++		kbd_m_lctrl  = $04
++		kbd_m_rctrl  = $08
++		kbd_m_caps   = $10
++
++		con_cols  = 80
++		con_rows  = 30
++		con_rowb  = con_cols*2		;bytes per row
++		con_size  = con_rows*con_rowb
++		con_attr  = $07			;grey on black
++		con_blank = con_attr*256+$20	;a blank cell, as a word
++
++	;; Clears the screen, homes the cursor and switches the display to text.
++con_init	jsr ser_init
++		stz con_ptr
++		stz con_ptr+1
++		stz con_state
++		stz kbd_pend
++		stz kbd_mods
++		stz kbd_busy
++		stz kbd_code+1		;the index's high byte is always 0
++		lda #$ff
++		sta kbd_next
++		lda #$70
++		sta con_ptr+2
++		long_a
++		stz con_col
++		stz con_row
++		short_a
++		ldy #0			;blank the top row by hand...
++		jsr con_clrrow
++		ldx #blt_spread		;...and have the blitter copy it down
++		jsr con_blit
++		lda #1
++		sta vid_mode
++		jsr con_setpos
++		jmp con_cursor
++
++	;; Waits for a character from the serial port or the keyboard and
++	;; returns it in A. Preserves X and Y, as ser_getc does.
++con_getc	phx
++		phy
++		jsr con_get
++		ply
++		plx
+ 		rts
+ 
+-	;; Character in A
+-con_putc
++con_get		lda kbd_pend		;part-way through a cursor key?
++		beq con_get0
++		dec kbd_pend
++		beq con_get_fin
++		lda #'['
+ 		rts
++con_get_fin	lda kbd_final
++		rts
+ 
++con_get0	lda kbd_next		;second event of the last packet
++		cmp #$ff
++		beq con_get1
++		pha
++		lda #$ff
++		sta kbd_next
++		pla
++		jsr kbd_key
++		bcc con_get0
++		rts
++
++con_get1	lda ser_status		;serial first: it cannot wait
++		and #$08
++		beq con_get2
++		lda ser_data
++		rts
++
++con_get2	lda adb_status
++		bmi con_get1		;transaction in flight
++		lda kbd_busy
++		beq con_get3
++		stz kbd_busy		;one has just finished: is it a key packet?
++		lda adb_status
++		and #$6f		;done, timeout, count
++		cmp #$42		;done, no timeout, exactly two bytes
++		bne con_get3
++		lda adb_ctrl
++		and #$01		;collision: not to be trusted
++		bne con_get3
++		lda adb_data+1
++		sta kbd_next
++		lda adb_data
++		jsr kbd_key
++		bcc con_get0
++		rts
++con_get3	lda #adb_talk0		;start the next poll
++		sta adb_cmd
++		inc kbd_busy
++		bra con_get1
++
++	;; Handles one key event (bit 7 set = key up, low 7 bits = key code).
++	;; Returns carry set and a character in A if it produced one.
++kbd_key		sta kbd_event
++		and #$7f
++		sta kbd_code
++		cmp #$38
++		bne kbd_key1
++		lda #kbd_m_lshift
++		bra kbd_mod
++kbd_key1	cmp #$7b
++		bne kbd_key2
++		lda #kbd_m_rshift
++		bra kbd_mod
++kbd_key2	cmp #$36
++		bne kbd_key3
++		lda #kbd_m_lctrl
++		bra kbd_mod
++kbd_key3	cmp #$7d
++		bne kbd_key4
++		lda #kbd_m_rctrl
++		bra kbd_mod
++kbd_key4	cmp #$39
++		bne kbd_key5
++		lda #kbd_m_caps		;the key latches: down = on, up = off
++
++	;; A modifier: set its bit on key down, clear it on key up.
++kbd_mod		bit kbd_event
++		bmi kbd_mod_up
++		ora kbd_mods
++		sta kbd_mods
++		bra kbd_none
++kbd_mod_up	eor #$ff
++		and kbd_mods
++		sta kbd_mods
++kbd_none	clc
++		rts
++
++kbd_key5	lda kbd_event
++		bmi kbd_none		;other keys only act on the way down
++		ldx kbd_code
++		lda kbd_mods
++		and #kbd_m_lshift | kbd_m_rshift
++		bne kbd_key6
++		lda.w kbd_plain,x
++		bra kbd_key7
++kbd_key6	lda.w kbd_shift,x
++kbd_key7	beq kbd_none		;no character on this key
++		bpl kbd_key8
++		and #$7f		;cursor key: ESC now, then [ and the letter
++		sta kbd_final
++		lda #2
++		sta kbd_pend
++		lda #$1b
++		sec
++		rts
++
++kbd_key8	sta kbd_event		;reuse as the character being built
++		ora #$20
++		cmp #'a'
++		bcc kbd_key9
++		cmp #'z'+1
++		bcs kbd_key9
++		lda kbd_mods		;a letter: caps lock swaps its case
++		and #kbd_m_caps
++		beq kbd_key9
++		lda kbd_event
++		eor #$20
++		sta kbd_event
++kbd_key9	lda kbd_mods
++		and #kbd_m_lctrl | kbd_m_rctrl
++		beq kbd_key10
++		lda kbd_event
++		cmp #$40
++		bcc kbd_key10		;control only applies to @ A-Z [ \ ] ^ _ etc.
++		and #$1f
++		sec
++		rts
++kbd_key10	lda kbd_event
++		sec
++		rts
++
++	;; Character in A. Preserves A, X and Y, as ser_putc does.
++con_putc	jsr ser_putc
++		pha
++		phx
++		phy
++		jsr con_vput
++		ply
++		plx
++		pla
++		rts
++
++	;; Display side of con_putc.
++con_vput	sta con_char
++		jsr con_cursor		;cursor off
++		lda con_state
++		beq con_norm
++		cmp #1
++		beq con_esc1
++
++		;; In a sequence: parameter bytes, then a final byte >= $40.
++		lda con_char
++		cmp #$40
++		bcc con_done
++		stz con_state
++		cmp #'A'
++		beq con_up
++		cmp #'B'
++		beq con_down
++		cmp #'C'
++		beq con_right
++		cmp #'D'
++		beq con_left
++		cmp #'K'
++		bne con_done
++		jsr con_clreol
++		bra con_done
++
++con_esc1	stz con_state
++		lda con_char
++		cmp #'['
++		bne con_done
++		lda #2
++		sta con_state
++		bra con_done
++
++con_up		lda con_row
++		beq con_done
++		dec con_row
++		bra con_done
++
++con_down	lda con_row
++		cmp #con_rows-1
++		beq con_done
++		inc con_row
++		bra con_done
++
++con_left	lda con_col
++		beq con_done
++		dec con_col
++
++con_done	jsr con_setpos
++		jmp con_cursor		;cursor back on
++
++con_norm	lda con_char
++		cmp #$1b
++		bne con_norm1
++		lda #1
++		sta con_state
++		bra con_done
++con_norm1	cmp #$0d
++		bne con_norm2
++		stz con_col
++		bra con_done
++con_norm2	cmp #$0a
++		beq con_lf
++		cmp #$08
++		beq con_left
++		cmp #$20
++		bcc con_done		;other control characters do nothing
++		ldy con_pos
++		sta [con_ptr],y
++
++con_right	inc con_col
++		lda con_col
++		cmp #con_cols
++		bne con_done
++		stz con_col		;wrap onto the next line
++
++con_lf		lda con_row
++		cmp #con_rows-1
++		beq con_lf1
++		inc con_row
++		bra con_done
++con_lf1		jsr con_scroll
++		bra con_done
++
++	;; Sets con_pos from con_row and con_col: row * 160 + col * 2.
++con_setpos	long_a
++		lda con_row
++		asl a
++		asl a
++		asl a
++		asl a
++		asl a
++		sta con_tmp		;row * 32
++		asl a
++		asl a			;row * 128
++		clc
++		adc con_tmp
++		adc con_col
++		adc con_col
++		sta con_pos
++		short_a
++		rts
++
++	;; Inverts the attribute of the cell at con_pos.
++con_cursor	ldy con_pos
++		iny
++		lda [con_ptr],y
++		eor #$77
++		sta [con_ptr],y
++		rts
++
++	;; Blanks from the cursor to the end of its row.
++con_clreol	long_a
++		lda con_pos
++		sec
++		sbc con_col
++		sbc con_col		;start of this row
++		clc
++		adc #con_rowb
++		sta con_tmp		;start of the next
++		ldy con_pos
++		lda #con_blank
++con_clreol0	sta [con_ptr],y
++		iny
++		iny
++		cpy con_tmp
++		bne con_clreol0
++		short_a
++		rts
++
++	;; Moves everything up one row and blanks the last.
++con_scroll	ldx #blt_scroll
++		jsr con_blit
++		ldy #con_size-con_rowb
++
++	;; Blanks the row whose offset is in Y.
++con_clrrow	long_a
++		tya
++		clc
++		adc #con_rowb
++		sta con_tmp		;where the row ends
++		lda #con_blank
++con_clrrow0	sta [con_ptr],y
++		iny
++		iny
++		cpy con_tmp
++		bne con_clrrow0
++		short_a
++		rts
++
++	;; Loads the 19 blitter registers from the block at X -- the last is the
++	;; control register, which starts it -- and waits for it to finish.
++con_blit	ldy #0
++con_blit0	lda.w 0,x
++		sta.w blt_base,y
++		inx
++		iny
++		cpy #$13
++		bne con_blit0
++con_blit1	lda blt_ctrl
++		bmi con_blit1
++		rts
++
++	;; Blitter register blocks: SRC(3) - DST(3) - SRC_STRIDE(2) DST_STRIDE(2)
++	;; WIDTH(2) HEIGHT(2) OP COLOUR CONTROL. A row is 320 pixels.
++
++	;; Scroll: rows 1-29 to rows 0-28, top down, so each row is read
++	;; before it is overwritten.
++blt_scroll	data.b $40,$01,$e0,$00
++		data.b $00,$00,$e0,$00
++		data.b $40,$01,$40,$01
++		data.b $40,$01,con_rows-1,$00
++		data.b $03,$00,$01
++
++	;; Clear: row 0 to row 1, then row 1 to row 2, and so on down. Here the
++	;; overlap is the point -- each line copies the one just written.
++blt_spread	data.b $00,$00,$e0,$00
++		data.b $40,$01,$e0,$00
++		data.b $40,$01,$40,$01
++		data.b $40,$01,con_rows-1,$00
++		data.b $03,$00,$01
++
++		include "kbdmap.asm"
+diff -uN a/interp.asm b/interp.asm
+--- a/interp.asm	2026-10-13 16:30:40
++++ b/interp.asm	2026-10-13 19:09:17
+@@ -1,6 +1,158 @@
++********************************************************************************
++* Command interpreter                                                          *
++*                                                                              *
++* Takes the line readline left in `buffer` and runs it:                        *
++*                                                                              *
++*   dm addr [count]    dump memory, 64 bytes unless a count is given           *
++*   sm addr byte ...   set memory: store the bytes from addr upwards           *
++*   go addr            call the code at addr                                   *
++*   ?                  list the commands                                       *
++*                                                                              *
++* Numbers are hexadecimal, up to six digits, with an optional leading $.       *
++* Addresses are 24 bit, so `dm 700000` reaches the display memory. Commands    *
++* and digits may be in either case.                                            *
++*                                                                              *
++* X is the index into the line throughout the parsing.                         *
++********************************************************************************
+ 
+-interp	ldx #$0200
+-	ldy #$0040
+-	jsr cmd_dm
+-	rts
+-	
++		mon_addr = $0060	;24 bit address a command works on
++		mon_num  = $0064	;24 bit result of gethex
++		mon_cnt  = $0068	;16 bit byte count for dm
++		mon_tmp  = $006a	;16 bit scratch
++
++		dm_default = $40	;bytes dumped when no count is given
++
++interp		ldx #0
++		jsr skipsp
++		lda buffer,x
++		beq interp_done		;empty line
++		cmp #'?'
++		beq interp_help
++		ora #$20
++		sta mon_tmp
++		lda buffer+1,x
++		ora #$20
++		sta mon_tmp+1
++		inx
++		inx
++		lda buffer,x		;the name must end here
++		beq interp_name
++		cmp #space
++		bne interp_bad
++interp_name	lda mon_tmp
++		cmp #'d'
++		bne interp1
++		lda mon_tmp+1
++		cmp #'m'
++		bne interp_bad
++		brl cmd_dm
++interp1		cmp #'s'
++		bne interp2
++		lda mon_tmp+1
++		cmp #'m'
++		bne interp_bad
++		brl cmd_sm
++interp2		cmp #'g'
++		bne interp_bad
++		lda mon_tmp+1
++		cmp #'o'
++		bne interp_bad
++		brl cmd_go
++
++interp_help	jsr prn_newline
++		ldx #str_help1
++		jsr prn_strln
++		ldx #str_help2
++		jsr prn_strln
++		ldx #str_help3
++		jmp prn_str
++
++	;; Commands come here with anything they cannot make sense of.
++interp_bad	jsr prn_newline
++		lda #'?'
++		jsr con_putc
++interp_done	rts
++
++str_help1	text.0 "dm addr [count]   dump memory"
++str_help2	text.0 "sm addr byte ...  set memory"
++str_help3	text.0 "go addr           call code (return with RTL)"
++
++	;; Moves X past any spaces.
++skipsp		lda buffer,x
++		cmp #space
++		bne skipsp_end
++		inx
++		bra skipsp
++skipsp_end	rts
++
++	;; Carry set if nothing but spaces is left on the line.
++ateol		jsr skipsp
++		lda buffer,x
++		beq ateol_yes
++		clc
++		rts
++ateol_yes	sec
++		rts
++
++	;; Reads a hex number into mon_num. Carry set if there was one, clear
++	;; (with X still on the offending character) if not. Uses Y.
++gethex		jsr skipsp
++		stz mon_num
++		stz mon_num+1
++		stz mon_num+2
++		ldy #0			;digits seen
++		lda buffer,x
++		cmp #'$'
++		bne gethex1
++		inx
++gethex0		lda buffer,x
++gethex1		jsr hexval
++		bcc gethex_end
++		pha
++		jsr gethex_shl
++		jsr gethex_shl
++		jsr gethex_shl
++		jsr gethex_shl
++		pla
++		ora mon_num
++		sta mon_num
++		inx
++		iny
++		bra gethex0
++gethex_end	cpy #1			;carry = at least one digit
++		rts
++
++gethex_shl	asl mon_num
++		rol mon_num+1
++		rol mon_num+2
++		rts
++
++	;; Converts the hex digit in A to its value. Carry clear if it is not one.
++hexval		cmp #'0'
++		bcc hexval_no
++		cmp #'9'+1
++		bcc hexval_dig
++		ora #$20
++		cmp #'a'
++		bcc hexval_no
++		cmp #'f'+1
++		bcs hexval_no
++		sbc #'a'-11		;carry is clear, so this subtracts 'a'-10
++		sec
++		rts
++hexval_dig	and #$0f
++		sec
++		rts
++hexval_no	clc
++		rts
++
++	;; Reads an address into mon_addr. Carry clear if there was none.
++getaddr		jsr gethex
++		bcc getaddr_end
++		lda mon_num
++		sta mon_addr
++		lda mon_num+1
++		sta mon_addr+1
++		lda mon_num+2
++		sta mon_addr+2
++getaddr_end	rts
+diff -uN a/kbdmap.asm b/kbdmap.asm
+--- a/kbdmap.asm	1970-01-01 12:00:00
++++ b/kbdmap.asm	2026-10-13 19:09:17
+@@ -0,0 +1,46 @@
++********************************************************************************
++* ADB key code -> character tables, US layout                                  *
++*                                                                              *
++* Indexed by the 7 bit key code. 0 means the key produces nothing (modifiers   *
++* are handled before the lookup). A value with bit 7 set is a cursor key: the  *
++* low 7 bits are the final letter of the sequence ESC [ <letter>.              *
++*                                                                              *
++* Return and keypad Enter give CR, Delete gives $7F (which readline treats as  *
++* backspace) and forward Delete gives ctrl-D, readline's delete-forward.       *
++********************************************************************************
++
++kbd_plain
++		data.b $61,$73,$64,$66,$68,$67,$7a,$78	;$00
++		data.b $63,$76,$00,$62,$71,$77,$65,$72	;$08
++		data.b $79,$74,$31,$32,$33,$34,$36,$35	;$10
++		data.b $3d,$39,$37,$2d,$38,$30,$5d,$6f	;$18
++		data.b $75,$5b,$69,$70,$0d,$6c,$6a,$27	;$20
++		data.b $6b,$3b,$5c,$2c,$2f,$6e,$6d,$2e	;$28
++		data.b $09,$20,$60,$7f,$00,$1b,$00,$00	;$30
++		data.b $00,$00,$00,$c4,$c3,$c2,$c1,$00	;$38
++		data.b $00,$2e,$00,$2a,$00,$2b,$00,$00	;$40
++		data.b $00,$00,$00,$2f,$0d,$00,$2d,$00	;$48
++		data.b $00,$3d,$30,$31,$32,$33,$34,$35	;$50
++		data.b $36,$37,$00,$38,$39,$00,$00,$00	;$58
++		data.b $00,$00,$00,$00,$00,$00,$00,$00	;$60
++		data.b $00,$00,$00,$00,$00,$00,$00,$00	;$68
++		data.b $00,$00,$00,$00,$00,$04,$00,$00	;$70
++		data.b $00,$00,$00,$00,$00,$00,$00,$00	;$78
++
++kbd_shift
++		data.b $41,$53,$44,$46,$48,$47,$5a,$58	;$00
++		data.b $43,$56,$00,$42,$51,$57,$45,$52	;$08
++		data.b $59,$54,$21,$40,$23,$24,$5e,$25	;$10
++		data.b $2b,$28,$26,$5f,$2a,$29,$7d,$4f	;$18
++		data.b $55,$7b,$49,$50,$0d,$4c,$4a,$22	;$20
++		data.b $4b,$3a,$7c,$3c,$3f,$4e,$4d,$3e	;$28
++		data.b $09,$20,$7e,$7f,$00,$1b,$00,$00	;$30
++		data.b $00,$00,$00,$c4,$c3,$c2,$c1,$00	;$38
++		data.b $00,$2e,$00,$2a,$00,$2b,$00,$00	;$40
++		data.b $00,$00,$00,$2f,$0d,$00,$2d,$00	;$48
++		data.b $00,$3d,$30,$31,$32,$33,$34,$35	;$50
++		data.b $36,$37,$00,$38,$39,$00,$00,$00	;$58
++		data.b $00,$00,$00,$00,$00,$00,$00,$00	;$60
++		data.b $00,$00,$00,$00,$00,$00,$00,$00	;$68
++		data.b $00,$00,$00,$00,$00,$04,$00,$00	;$70
++		data.b $00,$00,$00,$00,$00,$00,$00,$00	;$78
+diff -uN a/minimon.asm b/minimon.asm
+--- a/minimon.asm	2026-10-13 16:30:40
++++ b/minimon.asm	2026-10-13 19:09:17
+@@ -21,7 +21,7 @@
+ cold	native
+ 	short_a			;just in case
+ 	long_i
+-	jsr ser_init
++	jsr con_init
+ 	jsr prn_newline
+ 	ldx #str_init
+ 	jsr prn_strln
+@@ -32,6 +32,9 @@
+ str_init text.0 "MiniMon 0.01"
+ 	
+ 	include "serial.asm"
++
++	
++	include "console.asm"
+ 
+ 	
+ 	include "readline.asm"
+diff -uN a/print.asm b/print.asm
+--- a/print.asm	2026-10-13 16:30:40
++++ b/print.asm	2026-10-13 19:09:17
+@@ -9,7 +9,7 @@
+ 	;; Address in X
+ prn_str:	lda.w 0,x
+ 		beq prn_done
+-		jsr ser_putc
++		jsr con_putc
+ 		inx
+ 		bne prn_str
+ prn_done:	rts
+@@ -34,19 +34,19 @@
+ 		bra fin
+ prn_num:	clc
+ 		adc #'0'
+-fin		jsr ser_putc
++fin		jsr con_putc
+ 		rts	
+ 
+ 	;; This version only works up to 7 chars
+ prn_int:	and #$07
+ 		clc
+ 		adc #'0'
+-		jmp ser_putc
++		jmp con_putc
+ 
+ prn_newline:	lda #as_cr
+-		jsr ser_putc
++		jsr con_putc
+ 		lda #as_lf
+-		jmp ser_putc
++		jmp con_putc
+ 	
+ prn_cursor_l:	ldx #vt_cursor_l
+ 		jmp prn_str
+diff -uN a/readline.asm b/readline.asm
+--- a/readline.asm	2026-10-13 16:30:40
++++ b/readline.asm	2026-10-13 19:09:17
+@@ -21,7 +21,7 @@
+ * require quite a bit of storage.
+ * 
+ 
+-		buffer = $0200		;Readline buffer
++		buffer = $1000		;Readline buffer (clear of the I/O block at $0200)
+ 
+ 		space = $20		;Space character, start of printable chars
+ 		as_esc = $1b
+@@ -36,9 +36,9 @@
+ readline	ldx #$ffff	;x is cursor pos
+ 		jsr prn_newline
+ 		lda #'>'
+-		jsr ser_putc
++		jsr con_putc
+ 	
+-readloop	jsr ser_getc	;get a character
++readloop	jsr con_getc	;get a character
+ 		cmp #as_esc
+ 		beq esc_code
+ 		cmp #$7f
+@@ -50,7 +50,7 @@
+ 		cpx #$0100	;Only allow 255 chars
+ 		beq readloop
+ 		sta buffer,x
+-		jsr ser_putc
++		jsr con_putc
+ 		bra readloop
+ 
+ 
+@@ -70,8 +70,8 @@
+ 		beq return
+ 		brl readloop
+ 
+-esc_code	jsr ser_getc	;Should be [ (or O)
+-		jsr ser_getc	;The cmd
++esc_code	jsr con_getc	;Should be [ (or O)
++		jsr con_getc	;The cmd
+ 		cmp #'C'
+ 		beq forward
+ 		cmp #'D'
+@@ -144,7 +144,7 @@
+ redraw		phx
+ redraw_loop	lda buffer,x
+ 		beq redraw_eol
+-		jsr ser_putc
++		jsr con_putc
+ 		inx
+ 		bra redraw_loop
+ redraw_eol	jsr prn_clear_eol

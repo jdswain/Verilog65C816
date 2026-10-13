@@ -1,0 +1,20 @@
+=== 44.e: 3 pass, 9997 fail ===
+MISMATCH test 0 (cyc=200 done=0)
+  exp pc=cf82 s=0168 a=41d8 x=0085 y=001b d=0731 dbr=17 pbr=42 p=00110010 e=1
+  got pc=cf83 s=0168 a=4184 x=0031 y=00c7 d=0731 dbr=17 pbr=42 p=00110010 e=1
+
+=== 44.n: 3 pass, 9997 fail ===
+MISMATCH test 0 (cyc=200 done=0)
+  exp pc=2f0c s=3c77 a=0cb0 x=0020 y=00fe d=919a dbr=54 pbr=8b p=00111000 e=0
+  got pc=2f0d s=3c77 a=0c5c x=00cc y=00aa d=919a dbr=54 pbr=8b p=00111000 e=0
+
+=== 54.e: 4 pass, 9996 fail ===
+MISMATCH test 0 (cyc=200 done=0)
+  exp pc=eafa s=0114 a=45f2 x=006e y=00fa d=3a25 dbr=5c pbr=e2 p=11110001 e=1
+  got pc=eafb s=0114 a=459e x=00c2 y=004e d=3a25 dbr=5c pbr=e2 p=11110001 e=1
+
+=== 54.n: 1 pass, 9999 fail ===
+MISMATCH test 0 (cyc=200 done=0)
+  exp pc=1a9f s=73a1 a=ef8d x=0026 y=002f d=da56 dbr=3d pbr=06 p=11111111 e=0
+  got pc=1aa0 s=73a1 a=ef39 x=007a y=0083 d=da56 dbr=3d pbr=06 p=11111111 e=0
+

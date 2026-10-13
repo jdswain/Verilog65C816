@@ -1,0 +1,24 @@
+# Editor and tool leftovers
+*~
+.DS_Store
+__pycache__/
+.claude/settings.local.json
+
+# CPU core test bench: built simulators and generated vectors
+/sim
+/sim_harte
+/test.hex
+/harte/bin/
+
+# FPGA: Gowin output, built simulators, waveforms
+impl/
+/fpga/*_sim
+*.vcd
+/fpga/rtl/rom_path.vh
+
+# FPGA ROMs: keep the sources, and the two images whose source is elsewhere
+/fpga/rom/*
+!/fpga/rom/*.asm
+!/fpga/rom/minimon.hex
+!/fpga/rom/font_st8x16.hex
+!/fpga/rom/mon-fixes/

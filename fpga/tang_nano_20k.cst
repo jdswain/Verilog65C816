@@ -1,0 +1,118 @@
+// Tang Nano 20K (GW2AR-LV18QN88C8/I7) physical constraints
+//
+// Pin numbers per the Sipeed board documentation. The LEDs are common anode
+// (active low) and the buttons idle high, pulling low when pressed.
+
+IO_LOC  "clk" 4;
+IO_PORT "clk" IO_TYPE=LVCMOS33;
+
+IO_LOC  "rst" 87;
+IO_PORT "rst" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;   // S1 is active HIGH
+
+// Only one LED is left. The other five pins (15-19) went to the external
+// peripheral bus, which needs 20 and the board has barely that many free.
+IO_LOC  "led" 20;
+IO_PORT "led" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+//----------------------------------------------------------------------
+// External peripheral bus (external_bus.v). 20 pins, scraped together from
+// three places on the board:
+//
+//   ext_d[7:0]  -- LCD connector pins, which have no components on them.
+//                  The data bus is bidirectional, so it goes here rather than
+//                  on the HSPI group below: it is the worst signal to have
+//                  contended if the BL616 ever drives its side.
+//   ext_a[3:0]  -- the freed LED pins.
+//   selects and control -- the BL616's HSPI interface (71-76, 86). CAUTION:
+//                  these are shared with the BL616 MCU. They are free only
+//                  while its firmware leaves HSPI idle; if a card misbehaves,
+//                  suspect contention here first.
+//
+// ext_d is pulled up internally so an empty connector reads $FF rather than
+// whatever the pins float to. A card's driver trivially overrides a ~50k pull.
+// ext_irq_n is pulled up internally so an empty connector reads "no
+// interrupt" rather than floating into a permanent IRQ.
+//----------------------------------------------------------------------
+IO_LOC  "ext_d[0]" 25;
+IO_LOC  "ext_d[1]" 29;
+IO_LOC  "ext_d[2]" 30;
+IO_LOC  "ext_d[3]" 41;
+IO_LOC  "ext_d[4]" 42;
+IO_LOC  "ext_d[5]" 48;
+IO_LOC  "ext_d[6]" 49;
+IO_LOC  "ext_d[7]" 77;
+IO_PORT "ext_d[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_PORT "ext_d[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_PORT "ext_d[2]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_PORT "ext_d[3]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_PORT "ext_d[4]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_PORT "ext_d[5]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_PORT "ext_d[6]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_PORT "ext_d[7]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+IO_LOC  "ext_a[0]" 15;
+IO_LOC  "ext_a[1]" 16;
+IO_LOC  "ext_a[2]" 17;
+IO_LOC  "ext_a[3]" 18;
+IO_PORT "ext_a[0]" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
+IO_PORT "ext_a[1]" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
+IO_PORT "ext_a[2]" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
+IO_PORT "ext_a[3]" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
+
+IO_LOC  "ext_sel_n[0]" 71;
+IO_LOC  "ext_sel_n[1]" 72;
+IO_LOC  "ext_sel_n[2]" 73;
+IO_LOC  "ext_sel_n[3]" 74;
+IO_PORT "ext_sel_n[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_PORT "ext_sel_n[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_PORT "ext_sel_n[2]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_PORT "ext_sel_n[3]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+// STYLE=0: ext_rw is R/W (high = read), ext_phi0 is a free-running 1 MHz clock.
+// STYLE=1: ext_rw is WR#, ext_phi0 is RD#.
+IO_LOC  "ext_rw"    75;
+IO_LOC  "ext_phi0"  76;
+IO_LOC  "ext_res_n" 86;
+IO_LOC  "ext_irq_n" 19;
+IO_PORT "ext_rw"    IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
+IO_PORT "ext_phi0"  IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
+IO_PORT "ext_res_n" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
+IO_PORT "ext_irq_n" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+// Serial to the onboard BL616 USB bridge
+IO_LOC  "uart_tx" 69;
+IO_PORT "uart_tx" IO_TYPE=LVCMOS33 DRIVE=8;
+IO_LOC  "uart_rx" 70;
+IO_PORT "uart_rx" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+// HDMI. A differential pair takes both pin numbers on the _p port only;
+// the _n port is implied and must not appear here.
+IO_LOC  "tmds_clk_p" 33,34;
+IO_PORT "tmds_clk_p" PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC  "tmds_d_p[0]" 35,36;
+IO_PORT "tmds_d_p[0]" PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC  "tmds_d_p[1]" 37,38;
+IO_PORT "tmds_d_p[1]" PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+IO_LOC  "tmds_d_p[2]" 39,40;
+IO_PORT "tmds_d_p[2]" PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
+
+// Apple Desktop Bus. Two pins rather than one bidirectional: the bus is 5V
+// open-collector and the FPGA is 3.3V.
+//
+// adb_drive goes to a transistor that INVERTS -- FPGA high pulls the bus low.
+// PULL_MODE=DOWN so that while the FPGA is unconfigured and the pin floats,
+// the transistor stays off and the bus stays released.
+//
+// adb_sense has PULL_MODE=NONE, deliberately. An internal pull-up would fight
+// the bus's own pull-up (R3) and shift the sensed levels; the bus is already
+// pulled up externally and does not want help. Glitch rejection is done in RTL
+// instead of with an I/O hysteresis attribute -- there are ~2700 clocks per bit
+// cell, so there is plenty of time to spend on robustness.
+//
+// NOT pin 26: measured with a pull-up it reads LOW on this board, so something
+// holds it down and it is not usable as a free GPIO. Pins 27-30 were checked
+// and all float high (test/pintest.v puts candidate pins on the LEDs).
+IO_LOC  "adb_drive" 27;
+IO_PORT "adb_drive" IO_TYPE=LVCMOS33 PULL_MODE=DOWN DRIVE=8;
+IO_LOC  "adb_sense" 28;
+IO_PORT "adb_sense" IO_TYPE=LVCMOS33 PULL_MODE=NONE;

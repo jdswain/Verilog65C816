@@ -1,0 +1,202 @@
+#=============================================================================
+# fpga/Makefile -- simulation and ROM build for the Tang Nano 20K SoC
+#
+#   make sim        build and run the SoC simulation (fast, accelerated baud)
+#   make real       same, but at the true 27 MHz / 115200 clock ratio
+#   make send S=dm  type a command into the monitor after boot
+#   make rom        rebuild fpga/rom/minimon.hex from the monitor sources
+#   make lint       elaborate the synthesis top-level
+#
+# Synthesis is driven from the Gowin IDE; see fpga/README.md for the file list
+# and project settings.
+#=============================================================================
+IVERILOG ?= iverilog
+VVP      ?= vvp
+AS816    ?= $(HOME)/Developer/1av/65/65Tools/bin/as
+
+TOP      := top_tang20k
+ROOT     := ..
+RTL      := $(ROOT)/cpu_65c816.v $(wildcard rtl/*.v)
+IFLAGS   := -Irtl
+TB       := sim/tb_soc.v sim/sdram_model.v sim/adb_kbd_model.v
+# Which image gets baked into the bitstream. Override to build a variant:
+#   make bit ROM=rom/memtest.hex
+ROM      ?= rom/minimon.hex
+# Memory map baked into the bitstream: 0 = minimon (8 KB ROM at $E000, 6551 at
+# $C000), 1 = Rockwell Forth (16 KB ROM at $C000, R6501 serial at $0015).
+MAP      ?= 0
+ROM_BITS ?= 13
+ROM_BASE ?= 16'hE000
+ROM_VH   := rtl/rom_path.vh
+# Text-mode font, built from the EmuTOS source by `make font`.
+FONT     := rom/font_st8x16.hex
+
+# Where the monitor sources live. `make rom` needs the fixes described in
+# fpga/README.md applied there.
+MON_DIR  ?= $(HOME)/Developer/1av/65/mon/src
+
+# Real board ratio: 27 MHz crystal, 115200 baud.
+REAL_PARAMS := -Ptb_soc.DIVISOR=234 -Ptb_soc.CLK_HALF=19 \
+               -Ptb_soc.TIMEOUT=30000000 -Ptb_soc.TYPE_GAP=5
+
+GOWIN    ?= /Applications/GowinIDE.app/Contents/Resources/Gowin_EDA
+# Vendor primitive models (rPLL, CLKDIV, OSER10, ELVDS_OBUF). Needed to
+# elaborate the top level outside the Gowin tools; synthesis supplies its own.
+GOWIN_SIM := $(GOWIN)/IDE/simlib/gw2a/prim_sim.v
+GW_SH    := $(GOWIN)/IDE/bin/gw_sh
+GW_ENV   := DYLD_FRAMEWORK_PATH=$(GOWIN)/IDE/lib DYLD_LIBRARY_PATH=$(GOWIN)/IDE/lib
+BIT      := impl/pnr/soc816.fs
+PROG     := $(GOWIN)/Programmer/bin/programmer_cli
+DEVICE   := GW2AR-18C
+
+.PHONY: all sim real send lint rom image show memtest exttest romswitch adbtest fbtest maptest imgload texttest blttest font forth forth-bit bit prog boot talk flash scan clean
+
+all: sim
+
+soc_sim: $(RTL) $(TB) $(ROM) $(ROM_VH)
+	$(IVERILOG) -g2005 $(IFLAGS) -o $@ $(RTL) $(TB) $(GOWIN_SIM)
+
+soc_sim_real: $(RTL) $(TB) $(ROM) $(ROM_VH)
+	$(IVERILOG) -g2005 $(IFLAGS) $(REAL_PARAMS) -o $@ $(RTL) $(TB) $(GOWIN_SIM)
+
+sim: soc_sim
+	@cd $(ROOT) && $(VVP) fpga/soc_sim
+
+real: soc_sim_real
+	@cd $(ROOT) && $(VVP) fpga/soc_sim_real
+
+# Type a string into the monitor once it has booted:  make send S="dm e000"
+send: soc_sim
+	@cd $(ROOT) && $(VVP) fpga/soc_sim +send=$(S)
+
+lint: $(RTL) $(ROM_VH)
+	$(IVERILOG) -g2005 $(IFLAGS) -s lint_top -o /dev/null $(RTL) sim/lint_top.v $(GOWIN_SIM)
+
+# The assembler resolves includes relative to the source file and stores the
+# cwd in a 100-byte buffer, so it must run from the source directory and the
+# path to it must be short.
+rom:
+	cd $(MON_DIR) && $(AS816) -o minimon minimon.asm
+	python3 tools/asimg.py $(MON_DIR)/minimon $(MON_DIR)/minimon.lst rom/minimon.hex \
+	    --base 0xE000 --size 0x2000 --word 0xFFFC=0xE000 --width 16
+
+# Assemble the Rockwell Forth (kernel $F000-$FFFF + development $C000-$DFFF)
+# and lay both into one 16 KB image at $C000.
+FORTH_SRC ?= $(HOME)/Developer/1av/65/RockwellForth/src
+# T20K is this board: native mode, the 6551 at $0200, the text display and the
+# ADB keyboard, in the standard memory map. The 65C02 build runs in emulation
+# mode against the R6501 serial registers of the old Forth map:
+#   make forth forth-bit FORTH_MACHINE=65C02 FORTH_MAP=1
+FORTH_MACHINE ?= T20K
+FORTH_MAP     ?= 0
+forth:
+	cd $(FORTH_SRC) && $(AS816) -o ForthDevelopment-$(FORTH_MACHINE) -Dmachine='"$(FORTH_MACHINE)"' ForthDevelopment.asm
+	python3 tools/elf2hex.py $(FORTH_SRC)/ForthDevelopment-$(FORTH_MACHINE) rom/forth.hex \
+	    --base 0xC000 --size 0x4000 --sections kernel,development \
+	    --expect 0xC000=0x5A --expect 0xC001=0xA5 --width 16
+
+# Build the Forth bitstream: 16 KB ROM at $C000.
+forth-bit:
+	$(MAKE) bit ROM=rom/forth.hex MAP=$(FORTH_MAP) ROM_BITS=14 ROM_BASE="16'hC000"
+
+# The SDRAM exerciser. Self-contained: its macro include lives in rom/.
+memtest:
+	cd rom && $(AS816) -o memtest memtest.asm
+	python3 tools/asimg.py rom/memtest rom/memtest.lst rom/memtest.hex \
+	    --base 0xE000 --size 0x2000 --word 0xFFFC=0xE000 --width 16
+
+# The ADB and framebuffer exercisers.
+adbtest fbtest maptest imgload texttest blttest:
+	cd rom && $(AS816) -o $@ $@.asm
+	python3 tools/asimg.py rom/$@ rom/$@.lst rom/$@.hex \
+	    --base 0xE000 --size 0x2000 --word 0xFFFC=0xE000 --width 16
+
+# Show a picture on the display: convert it, then program the already-built
+# imgload bitstream and send the picture over the serial port (~14 s).
+#   make imgload && make bit ROM=rom/imgload.hex && make show
+# This deliberately does not depend on $(BIT), which would rebuild it around
+# whatever ROM is the default.
+IMG ?= img/lena.png
+image:
+	python3 tools/mkimage.py $(IMG) $(IMG:.png=.fb) --preview $(IMG:.png=_preview.png)
+
+show: image
+	python3 tools/board.py load $(BIT) $(IMG:.png=.fb)
+
+# Rebuild the text-mode font ROM from the EmuTOS source.
+font:
+	python3 tools/mkfont.py font/fnt_st_8x16.c $(FONT)
+
+# The ROM/RAM soft switch exerciser.
+romswitch:
+	cd rom && $(AS816) -o romswitch romswitch.asm
+	python3 tools/asimg.py rom/romswitch rom/romswitch.lst rom/romswitch.hex \
+	    --base 0xE000 --size 0x2000 --word 0xFFFC=0xE000 --width 16
+
+# The external-bus exerciser.
+exttest:
+	cd rom && $(AS816) -o exttest exttest.asm
+	python3 tools/asimg.py rom/exttest rom/exttest.lst rom/exttest.hex \
+	    --base 0xE000 --size 0x2000 --word 0xFFFC=0xE000 --width 16
+
+# $readmemh resolves relative to the tool's working directory, and Gowin runs
+# synthesis from impl/gwsynthesis/, so the path has to be absolute.
+#
+# This is always regenerated rather than being timestamp-driven: its contents
+# depend on the ROM *variable*, so `make bit ROM=other.hex` followed by a plain
+# `make bit` would otherwise leave a newer-looking file still naming the old
+# image and quietly build the wrong ROM into the bitstream. It only replaces
+# the file when the contents actually change, so nothing rebuilds needlessly.
+.PHONY: $(ROM_VH)
+$(ROM_VH):
+	@printf '// Generated by make -- do not edit.\n`define ROM_HEX_PATH "%s"\n`define FONT_HEX_PATH "%s"\n`define ROM_MAP %s\n`define ROM_BITS_DEF %s\n`define ROM_BASE_DEF %s\n' \
+	    "$(abspath $(ROM))" "$(abspath $(FONT))" "$(MAP)" "$(ROM_BITS)" "$(ROM_BASE)" > $@.tmp
+	@if cmp -s $@.tmp $@; then rm -f $@.tmp; \
+	 else mv $@.tmp $@; echo "generated $@ -> $(abspath $(ROM))"; fi
+
+# Synthesis + place & route. A missing ROM image is only a warning to the
+# Gowin tools -- they will happily build a bitstream with a blank ROM -- so
+# check for it explicitly and fail the build instead.
+bit: $(ROM) $(FONT) $(ROM_VH) $(RTL) tang_nano_20k.cst tang_nano_20k.sdc build.tcl
+	$(GW_ENV) $(GW_SH) build.tcl
+	@if grep -q 'Cannot open file' impl/gwsynthesis/soc816.log; then \
+	    echo; echo "*** ROM or font image was not loaded:"; \
+	    grep 'Cannot open file' impl/gwsynthesis/soc816.log; \
+	    echo "*** the bitstream would have a blank ROM or font -- refusing."; \
+	    rm -f $(BIT); exit 1; \
+	fi
+	@echo "bitstream: $(BIT)"
+
+# Load into FPGA SRAM: takes effect immediately, lost on power cycle.
+# This is the one to use while iterating.
+prog: $(BIT)
+	cd $(GOWIN)/Programmer/bin && ./programmer_cli \
+	    --device $(DEVICE) --operation_index 2 \
+	    --fsFile $(abspath $(BIT))
+
+# Write the bitstream to the board's external SPI flash so it survives a power
+# cycle. Operation 9 is "exFlash Erase,Program,Verify"; 2 (used by `prog`) loads
+# FPGA SRAM and is lost on power-down. Flashing takes appreciably longer than
+# an SRAM load, and is always recoverable -- the FPGA still accepts a JTAG SRAM
+# load regardless of what is in flash.
+flash: $(BIT)
+	@cd $(GOWIN)/Programmer/bin && ./programmer_cli \
+	    --device $(DEVICE) --operation_index 9 \
+	    --fsFile $(abspath $(BIT)) \
+	    | grep -viE 'programing:|programming\.\.\.|erasing|verify\.\.\.' 
+
+# Program and show the boot banner.
+boot: $(BIT)
+	python3 tools/board.py boot $(BIT)
+
+# Type a line at the monitor:  make talk C="dm e000"
+talk:
+	python3 tools/board.py send "$(C)"
+
+# Is a board attached?
+scan:
+	cd $(GOWIN)/Programmer/bin && ./programmer_cli --scan
+
+clean:
+	rm -f soc_sim soc_sim_real $(ROM_VH) $(ROOT)/soc.vcd
+	rm -rf impl

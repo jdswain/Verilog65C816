@@ -1,0 +1,71 @@
+--- a/serial.asm	2022-09-27 15:29:47
++++ b/serial.asm	2026-08-27 14:02:56
+@@ -21,9 +21,9 @@
+ 
+ 	;; Character in A
+ ser_putc	pha
+-		lda ser_status     ; is send buffer empty
++ser_putc0	lda ser_status     ; is send buffer empty
+         	and #$10          
+-        	beq ser_putc
++        	beq ser_putc0
+ 		pla
+         	sta ser_data          
+ 		rts
+--- a/minimon.asm	2022-09-27 15:29:47
++++ b/minimon.asm	2026-08-27 13:54:33
+@@ -47,7 +47,7 @@
+ 
+ 
+ 	
+-	include "math.asm"
++* include math.asm (BROKEN)
+ 
+ 
+ 	
+--- a/readline.asm	2022-09-27 15:29:47
++++ b/readline.asm	2026-08-27 13:54:07
+@@ -2,25 +2,25 @@
+ * Readline - command line reader                                               *
+ ********************************************************************************
+ 	
+-/*
+-Readline reads from the console into a line buffer.
++* 
++* Readline reads from the console into a line buffer.
++* 
++* It supports the following editing keys:
++* C-a       move to start of line
++* C-e       move to end of line
++* ->, C-f   move forward one character
++* -<, C-b   move back one character
++* M-f       move forward one word
++* M-b       move back one word
++* C-d       delete forward
++* BS        delete backwards
++* 
++* There is currently no copy and paste (or kill buffer) functionality.
++* 
++* There is currently no history function, but this could be added. This would
++* require quite a bit of storage.
++* 
+ 
+-It supports the following editing keys:
+-C-a       move to start of line
+-C-e       move to end of line
+-->, C-f   move forward one character
+--<, C-b   move back one character
+-M-f       move forward one word
+-M-b       move back one word
+-C-d       delete forward
+-BS        delete backwards
+-
+-There is currently no copy and paste (or kill buffer) functionality.
+-
+-There is currently no history function, but this could be added. This would
+-require quite a bit of storage.
+-*/
+-
+ 		buffer = $0200		;Readline buffer
+ 
+ 		space = $20		;Space character, start of printable chars
