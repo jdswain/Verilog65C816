@@ -49,7 +49,7 @@ BIT      := impl/pnr/soc816.fs
 PROG     := $(GOWIN)/Programmer/bin/programmer_cli
 DEVICE   := GW2AR-18C
 
-.PHONY: all sim real send lint rom image show memtest exttest romswitch adbtest fbtest maptest imgload texttest blttest font forth forth-bit bit prog boot talk flash scan clean
+.PHONY: all sim real send lint rom image show memtest exttest romswitch adbtest fbtest maptest imgload texttest blttest font forth forth-load forth-rom forth-bit bit prog boot talk flash scan clean
 
 all: sim
 
@@ -78,20 +78,29 @@ lint: $(RTL) $(ROM_VH)
 rom:
 	cd $(MON_DIR) && $(AS816) -o $(CURDIR)/rom/minimon.mem minimon.asm
 
-# Assemble the Rockwell Forth (kernel $F000-$FFFF + development $C000-$DFFF)
-# and lay both into one 16 KB image at $C000.
-FORTH_SRC ?= $(HOME)/Developer/1av/65/RockwellForth/src
-# T20K is this board: native mode, the 6551 at $0200, the text display and the
-# ADB keyboard, in the standard memory map. The 65C02 build runs in emulation
-# mode against the R6501 serial registers of the old Forth map:
-#   make forth forth-bit FORTH_MACHINE=65C02 FORTH_MAP=1
-FORTH_MACHINE ?= T20K
-FORTH_MAP     ?= 0
+# The Rockwell Forth, 16 KB: the development ROM, the console driver and the
+# kernel. `make forth-load` assembles it at $A000, sends it to the board with
+# MiniMon's ld command and starts it, then passes the terminal through until
+# control-]. The board must be running a MiniMon that has ld, and nothing else
+# may have the serial port open. L="HEX 1F 2 + ." types lines instead.
+FORTH_SRC   ?= $(HOME)/Developer/1av/65/RockwellForth/src
+FORTH_ENTRY ?= c008
 forth:
+	cd $(FORTH_SRC) && $(AS816) -o $(CURDIR)/rom/forth.hex -Dmachine='"T20K"' ForthDevelopment.asm
+
+forth-load: forth
+	python3 tools/mload.py rom/forth.hex $(FORTH_ENTRY) $(if $(L),"$(L)")
+
+# The same Forth as a ROM at $C000 in place of the monitor, and the bitstream
+# with it. The 65C02 build runs in emulation mode against the R6501 serial
+# registers of the old Forth map:
+#   make forth-rom forth-bit FORTH_MACHINE=65C02 FORTH_MAP=1
+FORTH_MACHINE ?= T20KROM
+FORTH_MAP     ?= 0
+forth-rom:
 	cd $(FORTH_SRC) && $(AS816) -o $(CURDIR)/rom/forth.mem -Dmachine='"$(FORTH_MACHINE)"' ForthDevelopment.asm
 
-# Build the Forth bitstream: 16 KB ROM at $C000.
-forth-bit:
+forth-bit: forth-rom
 	$(MAKE) bit ROM=rom/forth.mem MAP=$(FORTH_MAP) ROM_BITS=14 ROM_BASE="16'hC000"
 
 # The SDRAM exerciser. Self-contained: its macro include lives in rom/.

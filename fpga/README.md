@@ -886,6 +886,7 @@ it from the picture's top left corner, or give it as `RRGGBB`.
 | `dm addr [count]` | dump memory: 64 bytes, or `count` |
 | `sm addr byte ...` | set memory: store the bytes from `addr` upwards |
 | `go addr` | call the code at `addr` |
+| `ld` | load binary records from the serial port |
 | `?` | list the commands |
 
 Numbers are hexadecimal, up to six digits, with an optional leading `$`.
@@ -916,6 +917,16 @@ found it. A complete round trip:
 >dm 3000 1
 003000: 2A                                                *
 ```
+
+`ld` is for a program, not for typing: it takes a memory image far faster
+than `sm`, because nothing is echoed or parsed. After the command the monitor
+reads records, each a count (2 bytes, low first), an address (3 bytes, low
+first), that many bytes of data and the sum of all of those modulo 256. It
+answers a record with `+` if the sum is right and `-` if not, on the serial
+port only, and the sender repeats a record answered with `-`. A record with a
+count of zero ends the load. The bytes of a record need no pacing; the sender
+only has to wait for the answer before the next record. If nothing arrives for
+a few seconds the load is given up with a `?`. `tools/mload.py` is a sender.
 
 Low memory in use: the direct page `$40`-`$6B` belongs to the console and the
 interpreter, and the line buffer is the 256 bytes at `$1000`. Everything else
@@ -1433,10 +1444,25 @@ iverilog -g2005 -o /tmp/sdsim rtl/sdram_ctrl.v sim/sdram_model.v sim/tb_sdram.v 
 
 ### Rockwell Forth
 
-`make forth forth-bit` builds RSC-FORTH (source in `../../RockwellForth/src`)
-as a 16 KB ROM at `$C000` in the standard memory map: development ROM at
-`$C000`-`$DFFF`, kernel plus console driver at `$E000`-`$FFFF`. This is the
-`T20K` target of `ForthKernel.asm`:
+RSC-FORTH (source in `../../RockwellForth/src`) runs on this board in two
+ways, from the same source:
+
+```sh
+make forth-load                    # into RAM under MiniMon, then a terminal
+make forth-load L="HEX 1F 2 + ."   # ... or type these lines and print the replies
+make forth-rom forth-bit           # as a ROM in place of MiniMon
+```
+
+`make forth-load` assembles the `T20K` target, 16 KB at `$A000`-`$DFFF`, sends
+it with the monitor's `ld` command (`tools/mload.py`) and starts it with
+`go c008`. The board must be at the MiniMon prompt and nothing else may have
+the serial port open. `tools/mload.py prog.hex start` loads any program built
+with `as -o prog.hex` the same way.
+
+`make forth-rom forth-bit` builds the `T20KROM` target, the same Forth at
+`$C000`-`$FFFF`, into a bitstream with a 16 KB ROM. Either way the development
+ROM comes first, then the console driver at +`$2000` and the kernel at
++`$3000`:
 
 * 65C816 **native mode** with 8-bit registers. The kernel is still 6502 code;
   only the three places that relied on zero-page wrap-around and the two `TXS`
@@ -1444,12 +1470,13 @@ as a 16 KB ROM at `$C000` in the standard memory map: development ROM at
 * Console on the **text display and the serial port**, input from serial or
   the ADB keyboard, using MiniMon's driver (`ForthConsole-T20K.asm`).
 * User variables and input buffer at `$1000`, dictionary from `$1100`, disk
-  buffers at `$B7F8`-`$BFFF` -- all moved out of the I/O block.
-* `BANKC@ ( addr bank -- b )` and `BANKC! ( b addr bank -- )` reach all 8 MB:
+  buffers in the 2 KB below the Forth -- all moved out of the I/O block.
+* `BANK@`, `BANK!`, `BANKC@ ( addr bank -- b )` and `BANKC! ( b addr bank -- )`
+  reach all 8 MB:
   `HEX 41 0 70 BANKC!` puts an `A` in the top left of the screen.
-* No disk: the disk registers point at eight zero bytes in ROM.
+* No disk: the disk registers point at eight zero bytes in the image.
 
-`make forth forth-bit FORTH_MACHINE=65C02 FORTH_MAP=1` builds the unmodified
+`make forth-rom forth-bit FORTH_MACHINE=65C02 FORTH_MAP=1` builds the unmodified
 6502 Forth instead, in emulation mode against the R6501 serial registers of the
 old Forth map (no display).
 
