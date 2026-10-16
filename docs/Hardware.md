@@ -25,8 +25,7 @@ Each item is marked:
 | CPU, cache, 8 MB SDRAM, boot ROM | 65C816 core, GW2AR-18 | FPGA | Built |
 | Video, 640x480 HDMI, text and 16-colour graphics | | FPGA | Built |
 | Blitter | | FPGA | Built |
-| Console serial | Z85C30 SCC channel A | Emulated in the FPGA on the BL616 USB bridge; later the real chip | Emulation built |
-| Old console serial | 6551-style ACIA | FPGA, same pins as the SCC | Built; to be retired once nothing uses it |
+| Console serial | Z85C30 SCC channel A | Emulated in the FPGA on the BL616 USB bridge; later the real chip | Emulation built; it replaced the ACIA |
 | Keyboard and mouse | ADB host | FPGA, plus a transistor and level shifter | FPGA side built; circuit not built |
 | Two serial ports (one internal, one external) | Z85C80 SCC half | Carrier | Proposed |
 | SCSI (one internal, one external connector) | Z85C80 SCSI half (53C80) | Carrier | Proposed |
@@ -292,8 +291,7 @@ Channel 0 is at `$0400`, channel 1 at `$0410`.
 
 ## Interrupts
 
-**Built:** the card `IRQ#`, the ACIA interrupt and the emulated SCC's
-interrupt are ORed onto the 65C816's single `IRQ`. Bit 0 of `$0340` reads the
+**Built:** the card `IRQ#` and the emulated SCC's interrupt are ORed onto the 65C816's single `IRQ`. Bit 0 of `$0340` reads the
 card line.
 
 **Proposed:** keep one pin for the cards by wire-ORing their interrupts on the
@@ -323,7 +321,6 @@ Software finds the source by reading each chip:
 for each source the FPGA can tell apart:
 * the card line
 * the SCC (while it is emulated)
-* the ACIA
 * DMA channel 0 done
 * DMA channel 1 done
 * sound, if the SIDs get one
@@ -480,11 +477,9 @@ header lists what is left out.
   the real chip allows still works here; the bridge will enforce the
   recovery time on the real part.
 * The access never reaches the external bus pins.
-* The ACIA is still at `$0200` on the same serial pins. Both see what
-  arrives, and their transmitters are ANDed. Old software works with the
-  same bitstream, as long as it uses only one of the two.
+* It replaced the 6551 ACIA, which has been removed.
 
-MiniMon and Business Basic use the SCC. Rockwell Forth still uses the ACIA.
+MiniMon, Business Basic, Rockwell Forth and the test ROMs use it.
 em16 (65Tools) emulates the SCC as well (`EmSCC.Mod`), so Business Basic's
 test suite runs against it.
 
@@ -694,4 +689,3 @@ to the section that explains it.
    * the interrupt register
    * the `.cst` pin moves
    * sound: SIDs, I2S, and the SSPI build option
-5. Software: move Rockwell Forth's console to the SCC, then retire the ACIA.

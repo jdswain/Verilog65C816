@@ -21,7 +21,7 @@ module tb_soc #(
     parameter integer TIMEOUT  = 4_000_000,
     // Idle time between typed characters. The monitor echoes each character
     // and ser_putc blocks until the transmitter drains, so input sent with no
-    // gap overruns the ACIA's single receive register -- which is what a real
+    // gap overruns the SCC's three-byte receive FIFO -- which is what a real
     // terminal paste does too. A human typing leaves a gap this wide.
     parameter integer TYPE_GAP = 30,
     parameter         ROM_HEX   = "fpga/rom/minimon.mem",

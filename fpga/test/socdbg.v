@@ -1,4 +1,4 @@
-// Diagnostic wrapper: run the real SoC, but instead of trusting the ACIA,
+// Diagnostic wrapper: run the real SoC, but instead of trusting the serial port,
 // stream the CPU's address bus out of the transmitter that is known to work
 // on this board. Tells us whether the CPU runs at all and, if it is stuck,
 // exactly where.

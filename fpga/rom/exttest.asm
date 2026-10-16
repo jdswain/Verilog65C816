@@ -15,9 +15,7 @@
 	section "text"
 	org=$e000
 
-	ser_base   = $0200
-	ser_data   = ser_base + 0
-	ser_status = ser_base + 1
+	include "scc.asm"
 
 	ext_ctrl   = $0340	;w: bit0 = hold RES.  r: bit0 = card IRQ
 	ext_win    = $0800	;+$00 card0, +$10 card1, +$20 card2, +$30 card3
@@ -25,6 +23,7 @@
 start	native
 	short_a
 	long_i
+	jsr scc_init
 	ldx #str_hello
 	jsr puts
 
@@ -100,7 +99,7 @@ puts_end rts
 
 putc	pha
 putc0	lda ser_status
-	and #$10
+	and #ser_txrdy
 	beq putc0
 	pla
 	sta ser_data

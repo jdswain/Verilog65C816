@@ -19,7 +19,7 @@
 // default direct page and the emulation-mode stack, and the CPU comes out of
 // reset in emulation mode with D = $0000.
 //
-//   $0200-$023F   serial (6551 ACIA, 4 registers mirrored every 4 bytes)
+//   $0200-$023F   unclaimed, reads $FF (was the 6551 ACIA)
 //   $0240-$027F   palette: 16 entries x 4 bytes {red, green, blue, -}
 //   $0280-$02BF   keyboard: Apple Desktop Bus host (adb_host.v)
 //   $02C0-$02FF   SD card    (not implemented; reads $FF)
@@ -32,6 +32,8 @@
 //                   $0800+$00.. card 0 (IO0#)   $0820.. card 2 (IO2#)
 //                   $0810..     card 1 (IO1#)   $0830.. card 3 (IO3#)
 //                 and mirrored every 64 bytes to the end of the window.
+//                 $0820-$082F is the emulated SCC (scc_85c30.v), the serial
+//                 port, which answers instead of card 2.
 //
 // The boot ROM is a SOFT SWITCH. $0300 bit 0 resets to 1 (ROM mapped) and
 // clearing it hands $E000-$FFFF back to SDRAM, vectors included. Writes to
@@ -47,7 +49,7 @@
 //
 // The boot ROM has to stay in block RAM -- SDRAM is volatile and uninitialized
 // at power-up, so something non-volatile must hold the reset vector. It and the
-// ACIA are overlaid on top of the SDRAM range in bank 0.
+// I/O block are overlaid on top of the SDRAM range in bank 0.
 //
 // Bus timing: the core drives `addr`/`vld` and expects `rdata` to be valid on
 // the rising edge where `rdy` is high. Block RAM reads are registered, so every
@@ -67,7 +69,7 @@ module soc #(
     parameter integer DIVISOR   = 234,      // clk cycles per serial bit
     parameter         USE_SDRAM = 1,
     // Memory map selection.
-    //   MAP_MINIMON: 8 KB ROM at $E000, I/O block at $0200-$0FFF (ACIA at $0200)
+    //   MAP_MINIMON: 8 KB ROM at $E000, I/O block at $0200-$0FFF (SCC at $0820)
     //   MAP_FORTH:   16 KB ROM at $C000, R6501 serial at $0015-$0017
     // The Rockwell Forth is two ROMs -- kernel $F000-$FFFF and development
     // $C000-$DFFF -- with an I/O block at $E000 that would hold a disk
@@ -89,7 +91,7 @@ module soc #(
     output wire       txd,
     output wire       led,           // heartbeat, active high
     // Debug taps: let a wrapper watch what the CPU is doing without depending
-    // on the ACIA working.
+    // on the serial port working.
     output wire [23:0] dbg_addr,
     output wire        dbg_vld,
     output wire        dbg_we,
@@ -146,7 +148,6 @@ module soc #(
     wire        rdy;
     wire        vpa, vda, vpb_n, mlb_n;
     wire        e_flag, m_flag, x_flag, stopped;
-    wire        acia_irq_n;
     wire        scc_int_n;
     // External bus outputs, declared early because they feed the CPU's IRQ
     // input and the wait-state logic, both of which sit above the instance.
@@ -154,14 +155,13 @@ module soc #(
     wire        ext_ack;
     wire        ext_irq;
 
-    // The ACIA, the SCC and the external card share the 816's single IRQ
-    // line. It is a level input sampled between instructions, so registering
+    // The SCC and the external card share the 816's single IRQ line. It is a level input sampled between instructions, so registering
     // the merge costs nothing and keeps the extra gate out of the CPU's own
     // logic.
     reg irq_n;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) irq_n <= 1'b1;
-        else        irq_n <= acia_irq_n & scc_int_n & ~ext_irq;
+        else        irq_n <= scc_int_n & ~ext_irq;
     end
 
     wire [7:0] sdram_q;
@@ -211,7 +211,6 @@ module soc #(
     wire sel_io   = page0 & (addr[11:9] != 3'd0);
     wire sel_ext  = sel_io & addr[11];                       // $0800-$0FFF
     wire io_lo    = sel_io & ~addr[11];
-    wire sel_acia = io_lo & (addr[10:6] == 5'd8);            // $0200-$023F
     wire sel_pal  = io_lo & (addr[10:6] == 5'd9);            // $0240-$027F
     wire sel_adb  = io_lo & (addr[10:6] == 5'd10);           // $0280-$02BF
     wire sel_sys  = io_lo & (addr[10:6] == 5'd12);           // $0300-$033F
@@ -220,11 +219,11 @@ module soc #(
     wire sel_blt  = io_lo & (addr[10:6] == 5'd15);           // $03C0-$03FF
     wire sel_r6501 = (MAP == MAP_FORTH) & bank0 & (addr[15:8] == 8'h00)
                    & (addr[7:0] >= 8'h15) & (addr[7:0] <= 8'h17);
-    wire sel_ser  = sel_acia | sel_r6501;
+    wire sel_ser  = sel_r6501;
     // Everything below bank $80 that is not ROM or I/O.
     //
-    // Note this excludes `sel_io`, NOT `sel_ser`: the serial select is a subset
-    // of the I/O block, so excluding it as well is redundant -- and it dragged
+    // Note this excludes `sel_io`, not the device selects inside it: excluding
+    // one of those as well is redundant -- and when the ACIA's was, it dragged
     // the I/O sub-decode (io_lo, then a 5-bit compare) into the path. That
     // matters because sel_sdram feeds `rdy`, which gates the CPU's ALU: the
     // chain was bank0 -> sel_io -> io_lo -> sel_acia -> sel_sdram -> rdy, three
@@ -234,7 +233,7 @@ module soc #(
                                       & ~sel_r6501;
 
     //------------------------------------------------------------------
-    // Wait states. Block RAM and the ACIA answer in one wait cycle; SDRAM
+    // Wait states. Block RAM and on-chip I/O answer in one wait cycle; SDRAM
     // takes as long as it takes and reports completion with its own ack.
     //------------------------------------------------------------------
     // The held-word compare is NOT used to shortcut `rdy`. Timing analysis put
@@ -332,16 +331,12 @@ module soc #(
     wire [7:0]  rom_byte = a0_r ? rom_q[15:8] : rom_q[7:0];
 
     //------------------------------------------------------------------
-    // ACIA
-    //
-    // It shares the serial pins with the SCC's channel A while software moves
-    // over: both receive everything, and their transmitters are ANDed, which
-    // works as long as only one of them is used at a time (an idle line is
-    // high).
+    // R6501 serial port, for the Forth map only. In the default map the
+    // serial port is the SCC's channel A (below, with the external bus).
     //------------------------------------------------------------------
     wire [7:0] ser_q;
     wire       ser_txd, scc_txd;
-    assign txd = ser_txd & scc_txd;
+    assign txd = ser_txd & scc_txd;     // only one of them is ever active
 
     generate
     if (MAP == MAP_FORTH) begin : g_r6501
@@ -352,14 +347,9 @@ module soc #(
             .cs(stb & sel_r6501), .we(we),
             .rxd(rxd), .txd(ser_txd)
         );
-        assign acia_irq_n = 1'b1;
-    end else begin : g_acia
-        acia_6551 #(.DIVISOR(DIVISOR)) u_ser (
-            .clk(clk), .rst_n(rst_n),
-            .addr(addr[1:0]), .wdata(wdata), .rdata(ser_q),
-            .cs(stb & sel_acia), .we(we), .irq_n(acia_irq_n),
-            .rxd(rxd), .txd(ser_txd)
-        );
+    end else begin : g_noser
+        assign ser_q   = 8'hFF;
+        assign ser_txd = 1'b1;
     end
     endgenerate
 
@@ -580,7 +570,7 @@ module soc #(
     //       registered select inside it.
     //
     // Only the selects are registered, not the data. Some devices register
-    // their own read data on the strobe (the ACIA does), so it is not there to
+    // their own read data on the strobe (the R6501 serial port does), so it is not there to
     // be captured until the cycle after.
     //
     // Anything unclaimed reads $FF: it takes the I/O path, and the palette,
@@ -602,7 +592,7 @@ module soc #(
 
     // The ADB host's and the blitter's read data are combinational from the
     // address, which put address -> device mux -> rdata -> ALU back on the
-    // critical path. Capture them on the strobe, as the ACIA does inside.
+    // critical path. Capture them on the strobe.
     reg [7:0] adb_q_r, blt_q_r;
     always @(posedge clk) if (stb) begin
         adb_q_r <= adb_q;

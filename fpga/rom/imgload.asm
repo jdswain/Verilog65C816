@@ -12,7 +12,7 @@
 * about 2190 clocks at 115200 baud and the loop below takes well under 100.    *
 *                                                                              *
 * The framebuffer is written through a 24-bit pointer in the direct page, not  *
-* by moving DBR, because the loop also has to reach the ACIA in bank 0.        *
+* by moving DBR, because the loop also has to reach the SCC in bank 0.         *
 ********************************************************************************
 
 	include "mon-fixes/65816.asm"
@@ -20,9 +20,7 @@
 	section "text"
 	org=$e000
 
-	ser_base   = $0200
-	ser_data   = ser_base + 0
-	ser_status = ser_base + 1
+	include "scc.asm"
 
 	pal_base   = $0240
 
@@ -36,6 +34,7 @@
 start	native
 	short_a
 	long_i
+	jsr scc_init
 	stz sum
 	stz sum+1
 	stz ptr
@@ -78,7 +77,7 @@ halt	bra halt
 
 	;; Wait for a byte, add it to the checksum, return it in A.
 getc	lda ser_status
-	and #$08
+	and #ser_rxrdy
 	beq getc
 	lda ser_data
 	pha
@@ -99,7 +98,7 @@ puts_end rts
 
 putc	pha
 putc0	lda ser_status
-	and #$10
+	and #ser_txrdy
 	beq putc0
 	pla
 	sta ser_data

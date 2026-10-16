@@ -15,9 +15,7 @@
 	section "text"
 	org=$e000
 
-	ser_base   = $0200
-	ser_data   = ser_base + 0
-	ser_status = ser_base + 1
+	include "scc.asm"
 
 	sys_ctrl   = $0300	;bit 0: 1 = ROM mapped at $E000, 0 = RAM
 	probe      = $FF00	;spare location inside the ROM range
@@ -25,6 +23,7 @@
 start	native
 	short_a
 	long_i
+	jsr scc_init
 	ldx #str_hello
 	jsr puts
 
@@ -99,7 +98,7 @@ puts_end rts
 
 putc	pha
 putc0	lda ser_status
-	and #$10
+	and #ser_txrdy
 	beq putc0
 	pla
 	sta ser_data

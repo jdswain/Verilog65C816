@@ -19,9 +19,7 @@
 	section "text"
 	org=$e000
 
-	ser_base   = $0200
-	ser_data   = ser_base + 0
-	ser_status = ser_base + 1
+	include "scc.asm"
 	sys_ctrl   = $0300
 
 	;; Scratch, in the block reserved below the stack. Absolute, not direct
@@ -38,6 +36,7 @@ start	native
 	long_i
 	ldx #$dfff		;stack out of every region under test
 	txs
+	jsr scc_init
 
 	ldx #str_hello
 	jsr puts
@@ -212,7 +211,7 @@ puts_end rts
 
 putc	pha
 putc0	lda ser_status
-	and #$10
+	and #ser_txrdy
 	beq putc0
 	pla
 	sta ser_data

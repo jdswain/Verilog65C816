@@ -39,7 +39,7 @@ the 5V peripherals on a carrier (SCC, SCSI, floppy, DMA), is specified in
      +--+---------+-----------------+-------+
         |         |                 |
    ROM 8K BSRAM  cache          I/O block $00_0200
-   $00_E000       | port 1        acia_6551 + scc_85c30 --> BL616 --> USB serial
+   $00_E000       | port 1        scc_85c30 ----> BL616 --> USB serial
                   |               palette ----------+
             +-----v-------+       adb_host          |
             | sdram_burst |       system control    |
@@ -74,7 +74,7 @@ window for the external bus:
 
 | Range | Device |
 |---|---|
-| `$0200`-`$023F` | serial (6551 ACIA, 4 registers mirrored every 4 bytes) |
+| `$0200`-`$023F` | unclaimed, reads `$FF` (was the 6551 ACIA, replaced by the SCC) |
 | `$0240`-`$027F` | palette: 16 entries x 4 bytes `{red, green, blue, -}` |
 | `$0280`-`$02BF` | keyboard: Apple Desktop Bus host |
 | `$02C0`-`$02FF` | SD card *(not implemented, reads `$FF`)* |
@@ -348,8 +348,8 @@ res     dex
 
 The read side is the live state of the `IRQ#` pin, synchronised but not
 latched: it follows the card and clears when the card clears it. The card IRQ
-is ORed with the ACIA's and the SCC's into the 816's single `IRQ` line, so an
-ISR must check every source.
+is ORed with the SCC's into the 816's single `IRQ` line, so an ISR must check
+both sources.
 
 #### Bus style
 
@@ -507,7 +507,7 @@ half. Aliasing would make software that runs off the end of memory silently
 corrupt bank `$00`; reading `$FF` makes it fail visibly.
 
 The boot ROM has to stay in block RAM: SDRAM is volatile and uninitialized at
-power-up, so something non-volatile must hold the reset vector. It and the ACIA
+power-up, so something non-volatile must hold the reset vector. It and the I/O block
 are overlaid on top of the SDRAM range in bank 0, costing 12 KB of the 8 MB.
 
 ### Reset
@@ -678,9 +678,8 @@ looping over `$00E02E`-`$00E033` and `$00C001`, which is `ser_getc` polling the
 ACIA status register -- the monitor waiting for a keystroke.
 
 Timing closes with no violations -- setup and hold TNS both 0.000 across 0
-endpoints. **Fmax is 30.0 MHz against the 25.2 MHz system clock, 19% margin**,
-over a critical path 22 logic levels deep. It was 31.2 MHz before the SCC
-went in; see below.
+endpoints. **Fmax is 32.0 MHz against the 25.2 MHz system clock, 27% margin**.
+It was 31.2 MHz before the SCC went in; see below.
 
 It had fallen to 3% (26.0 MHz) once the blitter was in. The path was
 
@@ -705,14 +704,14 @@ The blitter's and ADB host's read data were still picked by the low address
 bits, so the CPU's address went through their register selects into the read
 data and the ALU. Adding the SCC moved placement enough for that path to
 take Fmax down to 26.4 MHz. Their read data is now captured on the strobe,
-as the ACIA does inside, and Fmax is **30.0 MHz (19% margin)**. What is left
+and Fmax was 30.0 MHz; with the ACIA removed it is 32.0 MHz. What is left
 on the worst path is the CPU's own address generation and the ALU, whose two
 chained adders -- binary then decimal correction -- are the larger part of
 it.
 
 The selects are registered rather than all the I/O data, because the ACIA
-registers its own read data on the strobe, so the byte is not there to
-capture until the cycle after. The first attempt registered the data and dropped serial
+(since replaced by the SCC) registered its own read data on the strobe, so
+the byte was not there to capture until the cycle after. The first attempt registered the data and dropped serial
 characters in simulation, which is what `make sim` and the test ROMs are for. The first bring-up ran
 straight from the 27 MHz crystal with 8% margin; as the cache and SDRAM went in
 that fell to under 1%, and the fix was to register the ROM read path and move
@@ -901,7 +900,7 @@ by byte and so has already written whatever came before a mistake.
 ```
 
 It reads each byte twice, once for each column, which matters only when
-pointed at a register with read side effects such as the ACIA's data register.
+pointed at a register with read side effects such as the SCC's data register.
 
 `go` enters the code with a long call, in native mode with an 8-bit
 accumulator and 16-bit index registers. **Return with `RTL`**, not `RTS`. On
@@ -1070,10 +1069,12 @@ chip will have, so software moves across unchanged.
 * **Bus handshake.** It answers through the external bus's handshake, but
   the access never reaches the bus pins.
 
-The ACIA stays at `$0200` on the same pins while software moves across. Both
-see everything that arrives, and their transmitters are ANDed. Old programs
-(Rockwell Forth) and new ones (MiniMon, Business Basic) run on the same
-bitstream, provided each uses only one of the two.
+It replaces the 6551 ACIA that was at `$0200`. MiniMon, Business Basic,
+Rockwell Forth and the test ROMs (through `rom/scc.asm`) all use it.
+
+* **Interrupts.** After its hardware reset the SCC raises no interrupts
+  until WR1 and MIE (WR9 bit 3) enable them. The Forth runs with IRQs on and
+  relies on this.
 
 `sim/tb_scc.v` checks the emulation against MiniMon's initialisation, with
 channel A looped back:
