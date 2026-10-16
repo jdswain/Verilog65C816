@@ -67,7 +67,7 @@ module soc #(
     parameter integer DIVISOR   = 234,      // clk cycles per serial bit
     parameter         USE_SDRAM = 1,
     // Memory map selection.
-    //   MAP_MINIMON: 8 KB ROM at $E000, 6551 ACIA at $C000
+    //   MAP_MINIMON: 8 KB ROM at $E000, I/O block at $0200-$0FFF (ACIA at $0200)
     //   MAP_FORTH:   16 KB ROM at $C000, R6501 serial at $0015-$0017
     // The Rockwell Forth is two ROMs -- kernel $F000-$FFFF and development
     // $C000-$DFFF -- with an I/O block at $E000 that would hold a disk
@@ -147,19 +147,21 @@ module soc #(
     wire        vpa, vda, vpb_n, mlb_n;
     wire        e_flag, m_flag, x_flag, stopped;
     wire        acia_irq_n;
+    wire        scc_int_n;
     // External bus outputs, declared early because they feed the CPU's IRQ
     // input and the wait-state logic, both of which sit above the instance.
     wire [7:0]  ext_q;
     wire        ext_ack;
     wire        ext_irq;
 
-    // The ACIA and the external card share the 816's single IRQ line. It is a
-    // level input sampled between instructions, so registering the merge costs
-    // nothing and keeps the extra gate out of the CPU's own logic.
+    // The ACIA, the SCC and the external card share the 816's single IRQ
+    // line. It is a level input sampled between instructions, so registering
+    // the merge costs nothing and keeps the extra gate out of the CPU's own
+    // logic.
     reg irq_n;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) irq_n <= 1'b1;
-        else        irq_n <= acia_irq_n & ~ext_irq;
+        else        irq_n <= acia_irq_n & scc_int_n & ~ext_irq;
     end
 
     wire [7:0] sdram_q;
@@ -331,8 +333,15 @@ module soc #(
 
     //------------------------------------------------------------------
     // ACIA
+    //
+    // It shares the serial pins with the SCC's channel A while software moves
+    // over: both receive everything, and their transmitters are ANDed, which
+    // works as long as only one of them is used at a time (an idle line is
+    // high).
     //------------------------------------------------------------------
     wire [7:0] ser_q;
+    wire       ser_txd, scc_txd;
+    assign txd = ser_txd & scc_txd;
 
     generate
     if (MAP == MAP_FORTH) begin : g_r6501
@@ -341,7 +350,7 @@ module soc #(
             .clk(clk), .rst_n(rst_n),
             .reg_sel(addr[1:0] - 2'd1), .wdata(wdata), .rdata(ser_q),
             .cs(stb & sel_r6501), .we(we),
-            .rxd(rxd), .txd(txd)
+            .rxd(rxd), .txd(ser_txd)
         );
         assign acia_irq_n = 1'b1;
     end else begin : g_acia
@@ -349,7 +358,7 @@ module soc #(
             .clk(clk), .rst_n(rst_n),
             .addr(addr[1:0]), .wdata(wdata), .rdata(ser_q),
             .cs(stb & sel_acia), .we(we), .irq_n(acia_irq_n),
-            .rxd(rxd), .txd(txd)
+            .rxd(rxd), .txd(ser_txd)
         );
     end
     endgenerate
@@ -484,13 +493,13 @@ module soc #(
     //------------------------------------------------------------------
     // External peripheral bus
     //
-    // The window is $E800-$EFFF. Within it addr[5:4] picks one of the four
+    // The window is $0800-$0FFF. Within it addr[5:4] picks one of the four
     // active-low card selects and addr[3:0] drives A3-A0, so each card gets 16
     // registers -- enough for a WD1773 (4) or an 82077AA (8). Decoding the
     // selects here instead of on the board costs one FPGA pin over exposing
     // A5-A4 and a '139, and removes a part.
     //
-    // $E100 is the bridge's own control register (not on the external bus):
+    // $0340 is the bridge's own control register (not on the external bus):
     //   write bit 0 = hold RES asserted to the cards
     //   read  bit 0 = card IRQ is asserted
     //------------------------------------------------------------------
@@ -502,12 +511,49 @@ module soc #(
 
     wire [7:0] extc_q = {7'd0, ext_irq};
 
+    //------------------------------------------------------------------
+    // Emulated SCC, $0820-$082F
+    //
+    // The SCC half of the Z85C80 that will be on the carrier, at the
+    // address the carrier gives it: card select 2 of the external bus. Until
+    // the board exists this answers instead, with channel A on the board's
+    // serial port, and the bridge never sees the access. It answers through
+    // the external bus's handshake, so the wait-state logic is unchanged.
+    //------------------------------------------------------------------
+    wire       scc_slot = (addr[10:4] == 7'h02);
+    wire       scc_req  = vld & sel_ext & scc_slot;
+    wire [7:0] scc_q;
+    wire [7:0] bridge_q;
+    wire       bridge_ack;
+    reg  [1:0] scc_st;                  // 0 idle, 1 ack, 2 gap
+    wire       scc_cs = scc_req & (scc_st == 2'd0);
+    wire       scc_ack = (scc_st == 2'd1);
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) scc_st <= 2'd0;
+        else case (scc_st)
+            2'd0:    if (scc_req) scc_st <= 2'd1;
+            2'd1:    scc_st <= 2'd2;     // the CPU takes the data and moves on
+            default: scc_st <= 2'd0;
+        endcase
+    end
+
+    scc_85c30 #(.DIVISOR(DIVISOR)) u_scc (
+        .clk(clk), .rst_n(rst_n),
+        .addr(addr[1:0]), .wdata(wdata), .rdata(scc_q),
+        .cs(scc_cs), .we(we), .int_n(scc_int_n),
+        .rxd(rxd), .txd(scc_txd)
+    );
+
+    assign ext_ack = bridge_ack | scc_ack;
+    assign ext_q   = scc_ack ? scc_q : bridge_q;
+
     external_bus #(
         .CLK_HZ(SYS_HZ), .PHI0_HZ(EXT_PHI0_HZ), .STYLE(EXT_STYLE)
     ) u_ext (
         .clk(clk), .rst_n(rst_n),
-        .addr(addr[10:0]), .wdata(wdata), .rdata(ext_q),
-        .req(vld & sel_ext), .we(we), .ack(ext_ack),
+        .addr(addr[10:0]), .wdata(wdata), .rdata(bridge_q),
+        .req(vld & sel_ext & ~scc_slot), .we(we), .ack(bridge_ack),
         .card_reset(card_reset), .irq(ext_irq),
         .ext_a(ext_a), .ext_d_in(ext_d_in), .ext_d_out(ext_d_out),
         .ext_d_oe(ext_d_oe), .ext_sel_n(ext_sel_n),
@@ -554,12 +600,21 @@ module soc #(
         r_none <= ~(sel_ser | sel_adb | sel_extc | sel_sys | sel_vid | sel_blt);
     end
 
+    // The ADB host's and the blitter's read data are combinational from the
+    // address, which put address -> device mux -> rdata -> ALU back on the
+    // critical path. Capture them on the strobe, as the ACIA does inside.
+    reg [7:0] adb_q_r, blt_q_r;
+    always @(posedge clk) if (stb) begin
+        adb_q_r <= adb_q;
+        blt_q_r <= blt_q;
+    end
+
     wire [7:0] io_q = ({8{r_ser}}  & ser_q)
-                    | ({8{r_adb}}  & adb_q)
+                    | ({8{r_adb}}  & adb_q_r)
                     | ({8{r_extc}} & extc_q)
                     | ({8{r_sys}}  & sys_q)
                     | ({8{r_vid}}  & vid_q)
-                    | ({8{r_blt}}  & blt_q)
+                    | ({8{r_blt}}  & blt_q_r)
                     | {8{r_none}};
 
     always @* begin

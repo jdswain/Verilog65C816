@@ -23,6 +23,10 @@ dm e000 20
 The same session appears on the HDMI display; see [Console](#console) and
 [Monitor commands](#monitor-commands).
 
+This document describes the SoC as it is. The board it is heading for, with
+the 5V peripherals on a carrier (SCC, SCSI, floppy, DMA), is specified in
+[`docs/Hardware.md`](../docs/Hardware.md).
+
 ```
    27 MHz crystal --> rPLL x14/3 = 126 MHz --> /5 = 25.2 MHz (system + pixel clock)
 
@@ -35,7 +39,7 @@ The same session appears on the HDMI display; see [Console](#console) and
      +--+---------+-----------------+-------+
         |         |                 |
    ROM 8K BSRAM  cache          I/O block $00_0200
-   $00_E000       | port 1        acia_6551 --> BL616 --> USB serial
+   $00_E000       | port 1        acia_6551 + scc_85c30 --> BL616 --> USB serial
                   |               palette ----------+
             +-----v-------+       adb_host          |
             | sdram_burst |       system control    |
@@ -80,6 +84,7 @@ window for the external bus:
 | `$03C0`-`$03FF` | blitter |
 | `$0400`-`$07FF` | unclaimed, reads `$FF` |
 | `$0800`-`$0FFF` | external bus window: 4 cards x 16 registers |
+| &nbsp;&nbsp;`$0820`-`$082F` | emulated Z85C30 SCC, answering instead of card 2 (see [Serial: the SCC](#serial-the-scc)) |
 
 Each device decodes a 64-byte slot, so its registers repeat within that slot.
 Anything unclaimed in the block reads `$FF`.
@@ -343,8 +348,8 @@ res     dex
 
 The read side is the live state of the `IRQ#` pin, synchronised but not
 latched: it follows the card and clears when the card clears it. The card IRQ
-is ORed with the ACIA's into the 816's single `IRQ` line, so an ISR must check
-both sources.
+is ORed with the ACIA's and the SCC's into the 816's single `IRQ` line, so an
+ISR must check every source.
 
 #### Bus style
 
@@ -364,32 +369,40 @@ half a PHI0 period later, which is the `tAR`/`tDW` setup the parts ask for.
 #### Connector pinout
 
 20 pins, scraped together from three places on the board. There was no single
-free bank big enough:
+free bank big enough. The notes are from Sipeed's schematic (revision 3923):
 
-| Signal | Pins | Where they came from |
+| Signal | Pins | What else is on them |
 |---|---|---|
-| `ext_d[7:0]` | 25, 29, 30, 41, 42, 48, 49, 77 | LCD connector (no components fitted) |
-| `ext_a[3:0]` | 15, 16, 17, 18 | four of the six LEDs |
-| `ext_sel_n[3:0]` | 71, 72, 73, 74 | BL616 HSPI |
-| `ext_rw` | 75 | BL616 HSPI |
-| `ext_phi0` | 76 | BL616 HSPI |
-| `ext_res_n` | 86 | BL616 HSPI |
+| `ext_d[7:0]` | 25, 29, 30, 41, 42, 48, 49, 77 | the LCD connector and the edge headers; see below for 25 and 49 |
+| `ext_a[3:0]` | 15, 16, 17, 18 | four of the six LEDs, and the LCD connector's touch pins |
+| `ext_sel_n[3:0]` | 71, 72, 73, 74 | headers only (they carry HSPI labels but don't reach the BL616) |
+| `ext_rw` | 75 | the BL616's SPI link (MISO) |
+| `ext_phi0` | 76 | the BL616's SPI link (MOSI) |
+| `ext_res_n` | 86 | the BL616's SPI link (DIR) |
 | `ext_irq_n` | 19 | the fifth LED |
 
-Two things to watch:
+Things to watch:
 
-* **Pins 71-76 and 86 are the BL616's HSPI interface.** They are free only
-  while its firmware leaves HSPI idle. If a card misbehaves in a way that looks
-  like someone else driving the bus, suspect this first. The data bus was put
-  on the LCD pins for exactly this reason -- it is the one group that is
-  bidirectional, so it is the worst to have contended.
-* **Pin 26 is not usable.** It reads low regardless of `PULL_MODE=UP`; that is
-  what caused a spurious SRQ on every ADB transaction before it was tracked
-  down. It is skipped here even though it looks free.
+* **Pin 25 (`ext_d[0]`) is HDMI CEC**, through 100R with a 27k pull-up. With a
+  monitor connected, the monitor sits on data bit 0. `docs/Hardware.md`
+  moves this bit to pin 31.
+* **Pin 49 (`ext_d[6]`) is the LCD backlight boost enable.** The boost
+  converter runs with no load whenever the bit is high.
+* **Pins 75, 76 and 86 go to the BL616**, which also has pin 13. They are
+  free only while its firmware leaves that link idle. If a card misbehaves in
+  a way that looks like someone else driving the bus, suspect this first.
+* **Pin 26 is the HDMI hot-plug detect line**: 2.2k to the connector, which
+  has 5.1k to ground, easily beating an internal pull-up. It reads low unless
+  a monitor asserts hot-plug. That is what caused a spurious SRQ on every ADB
+  transaction before it was tracked down. It is usable only as that input.
 
 `ext_d` and `ext_irq_n` are pulled up internally, so an empty connector reads
 `$FF` and no interrupt rather than floating. A card's driver trivially
 overrides a ~50k pull.
+
+The connector is a 3.3V bus and **the FPGA's pins are not 5V tolerant**. 5V
+cards need level shifting; `docs/Hardware.md` specifies it for the target
+board.
 
 `make exttest` builds a ROM that pulses `RES#`, dumps all four cards' 16
 registers and performs a write. With nothing plugged in it prints `FF`
@@ -398,48 +411,28 @@ full cycle and acks, and the CPU is released again.
 
 #### Finding more pins
 
-**From Sipeed's schematic (revision 3921), not yet checked on this board.** It
-contradicts three things said above, so treat those as open until a continuity
-check settles them.
+From Sipeed's schematic (revision 3923). The LCD connector is not a source of
+pins: every LCD signal is either also on an edge header, or is one of the
+eight HDMI pins (33-40 double as LCD colour bits). Exactly one pin is wired to
+the LCD connector and nothing else: **32**. A 40-pin 0.5 mm FPC breakout would
+reach it, but for one pin it is poor value -- and FPC pins 1-2 are the
+backlight boost converter's output, which runs unloaded whenever pin 49 is
+high, so they must be left unconnected.
 
-The LCD connector is not a source of pins. Every LCD signal is either also on
-an edge header, or is one of the eight HDMI pins (33-40 double as LCD colour
-bits). Exactly one pin is wired to the LCD connector and nothing else: **32**.
-A 40-pin 0.5 mm FPC breakout would reach it, but for one pin it is poor value
--- and FPC pins 1-2 are the backlight boost converter's output, which runs
-unloaded whenever pin 49 is high, so they must be left unconnected.
-
-What the schematic says is available, most usable first:
+What is available, most usable first:
 
 | Pins | Where | Cost |
 |---|---|---|
-| 31 | header J6-14 | none: unused, nothing on it |
+| 31 | header J6-14 and the LCD connector | none |
 | 32 | LCD connector only | none, but needs the FPC breakout |
 | 80, 85 | header | SD card 4-bit mode (SPI mode still works); 10k pull-ups |
-| 79 | header | the RGB LED; 5.1k pull-down |
+| 79 | header | the RGB LED (WS2812); 5.1k pull-down |
 | 51, 54, 55, 56 | header | the audio amplifier; 54-56 need "SSPI as regular I/O" |
 | 52, 53 | header | HDMI DDC (EDID); 2.2k pull-ups, and the monitor is on the lines |
 | 81-84 | microSD slot only | the SD card entirely; needs a microSD breakout |
 
 So one pin is free today, nine without any adapter, eleven counting the DDC
-pair.
-
-The three contradictions:
-
-* **`ext_d` is not on LCD-only pins.** All eight are on the edge headers too,
-  and two have parts on them: pin 25 (`ext_d[0]`) goes to HDMI CEC through
-  100R, so with a cable plugged in the monitor is on data bit 0; pin 49
-  (`ext_d[6]`) is the backlight boost enable.
-* **Only 75, 76 and 86 go to the BL616**, not 71-76 and 86. Pins 71-74 carry
-  HSPI names but reach only the headers. Pin 75 (`ext_rw`) is the BL616's boot
-  strap.
-* **Pin 26 is the HDMI hot-plug-detect line**, not a faulty pin: 2.2k to the
-  connector, which has 5.1k to ground, easily beating an internal pull-up. It
-  reads low with no monitor asserting hot-plug. Usable as that input and
-  nothing else.
-
-For DMA this is enough: a request line per channel fits on pin 31 and one of
-the SD or LED pins without touching anything in use.
+pair. `docs/Hardware.md` allocates 31, 79, 80 and 85 for the target board.
 
 ### Writing ROM sources against this map
 
@@ -578,9 +571,9 @@ with `DIVISOR=219` -- 6% apart, which does not change what the test shows.
 
 The monitor echoes each character, and `ser_putc` blocks until the transmitter
 drains, so the CPU is unavailable for a full character time after every byte it
-receives. The ACIA has a single receive holding register, so input arriving
-back-to-back -- a terminal paste, not a human typing -- will drop bytes and set
-the overrun bit, which MiniMon ignores. A receive FIFO or interrupt-driven
+receives. The SCC holds three received bytes (the ACIA held one), so input
+arriving back-to-back -- a terminal paste, not a human typing -- will still
+drop bytes and set the overrun bit, which MiniMon ignores. Interrupt-driven
 input is the fix when that starts to matter.
 
 ## Building the ROM
@@ -685,8 +678,9 @@ looping over `$00E02E`-`$00E033` and `$00C001`, which is `ser_getc` polling the
 ACIA status register -- the monitor waiting for a keystroke.
 
 Timing closes with no violations -- setup and hold TNS both 0.000 across 0
-endpoints. **Fmax is 31.2 MHz against the 25.2 MHz system clock, 24% margin**,
-over a critical path 24 logic levels deep.
+endpoints. **Fmax is 30.0 MHz against the 25.2 MHz system clock, 19% margin**,
+over a critical path 22 logic levels deep. It was 31.2 MHz before the SCC
+went in; see below.
 
 It had fallen to 3% (26.0 MHz) once the blitter was in. The path was
 
@@ -707,14 +701,18 @@ cycle it is used:
   selects are now registered in the first and used in the second; the external
   bus flags its own data with `ext_ack`; SDRAM is the default.
 
-What is left on the worst path is the CPU generating the address and a
-device's own register select (the blitter's and ADB host's read data are
-picked by the low address bits), then the ALU. The ALU's two chained adders --
-binary then decimal correction -- are now the larger part of it.
+The blitter's and ADB host's read data were still picked by the low address
+bits, so the CPU's address went through their register selects into the read
+data and the ALU. Adding the SCC moved placement enough for that path to
+take Fmax down to 26.4 MHz. Their read data is now captured on the strobe,
+as the ACIA does inside, and Fmax is **30.0 MHz (19% margin)**. What is left
+on the worst path is the CPU's own address generation and the ALU, whose two
+chained adders -- binary then decimal correction -- are the larger part of
+it.
 
-Only the selects could be registered, not the I/O data: the ACIA registers its
-own read data on the strobe, so the byte is not there to capture until the
-cycle after. The first attempt registered the data and dropped serial
+The selects are registered rather than all the I/O data, because the ACIA
+registers its own read data on the strobe, so the byte is not there to
+capture until the cycle after. The first attempt registered the data and dropped serial
 characters in simulation, which is what `make sim` and the test ROMs are for. The first bring-up ran
 straight from the 27 MHz crystal with 8% margin; as the cache and SDRAM went in
 that fell to under 1%, and the fix was to register the ROM read path and move
@@ -943,7 +941,7 @@ Input comes from the serial port or an ADB keyboard, whichever has something
 first.
 
 The driver is `console.asm` in the mon tree. The monitor's output calls go to
-`con_putc` instead of `ser_putc`, which sends the byte to the ACIA and then
+`con_putc` instead of `ser_putc`, which sends the byte to the serial port and then
 interprets it for the screen:
 
 | Input | Effect on the display |
@@ -985,7 +983,8 @@ While `con_getc` waits it polls the keyboard with Talk register 0 to device 2,
 the default keyboard address. Three things shape the code:
 
 * **Polling never blocks.** A transaction takes about 2 ms, which is 25
-  character times at 115200 baud, and the ACIA holds one received byte. So the
+  character times at 115200 baud, and the serial port holds three received
+  bytes. So the
   loop starts a poll, goes on checking the serial port, and collects the answer
   when the host reports it finished.
 * **Only a clean packet counts**: done, no timeout, exactly two bytes, no
@@ -1037,6 +1036,51 @@ iverilog -g2005 -Irtl -Ptb_soc.TIMEOUT=60000000 \
     ../cpu_65c816.v rtl/*.v sim/tb_soc.v sim/sdram_model.v sim/adb_kbd_model.v \
     $GOWIN_SIM
 cd .. && vvp fpga/soc_con +screen +send=hello +times=7    # enough to scroll
+```
+
+## Serial: the SCC
+
+The console's serial port is channel A of a Z85C30 SCC, the SCC half of the
+Z85C80 that will be on the carrier board ([`docs/Hardware.md`](../docs/Hardware.md)).
+Until the board exists, `rtl/scc_85c30.v` emulates it at the address the real
+chip will have, so software moves across unchanged.
+
+| Address | Register |
+|---|---|
+| `$0820` | channel B control |
+| `$0821` | channel B data |
+| `$0822` | channel A control: RR0 when the pointer is 0 |
+| `$0823` | channel A data |
+
+* **Channel A** is the board's serial port, through the BL616.
+* **Channel B** has no pins: what is written to it is dropped, and it never
+  receives.
+* **Control port.** The first write to a control port sets the register
+  pointer (WR0); the next access reads or writes that register and puts the
+  pointer back to 0. A read of the control port therefore gives RR0 when
+  nothing is pending. Polling needs RR0 bit 0 (a character is waiting) and
+  bit 2 (the transmit buffer is empty).
+* **Speed.** It runs at a fixed 115200 baud, 8N1, whatever the time constant
+  says. MiniMon writes the values for 115200 from a 7.3728 MHz clock anyway,
+  so its code is right for the real chip.
+* **What's emulated.** The receive FIFO, overrun and framing errors, the Rx
+  and Tx interrupts, MIE, RR2 and RR3 behave as on the real part. The
+  module's header lists what doesn't, including the real part's recovery
+  time between accesses.
+* **Bus handshake.** It answers through the external bus's handshake, but
+  the access never reaches the bus pins.
+
+The ACIA stays at `$0200` on the same pins while software moves across. Both
+see everything that arrives, and their transmitters are ANDed. Old programs
+(Rockwell Forth) and new ones (MiniMon, Business Basic) run on the same
+bitstream, provided each uses only one of the two.
+
+`sim/tb_scc.v` checks the emulation against MiniMon's initialisation, with
+channel A looped back:
+
+```sh
+iverilog -g2005 -o scc_sim rtl/scc_85c30.v rtl/uart_tx.v rtl/uart_rx.v sim/tb_scc.v
+vvp scc_sim
 ```
 
 ## Blitter and the memory-master port
@@ -1199,10 +1243,11 @@ open-collector bus and this is a 3.3V part, so an external buffer pulls the line
 low (`adb_drive`, **pin 27**) and a level shifter feeds `adb_sense` (**pin 28**).
 The FPGA never drives the bus high.
 
-**Not pin 26.** Measured with a pull-up it reads LOW on this board, so something
-holds it down and it is not usable as free GPIO -- the first symptom was a
-spurious SRQ on every transaction, because the host saw a permanently low bus.
-`test/pintest.v` puts candidate pins on the LEDs to check; 27-30 all float high.
+**Not pin 26.** It reads low on this board even with a pull-up, because it is
+the HDMI hot-plug detect line (2.2k to the connector, 5.1k to ground). The
+first symptom was a spurious SRQ on every transaction, because the host saw a
+permanently low bus. `test/pintest.v` puts candidate pins on the LEDs to
+check; 27-30 all float high.
 
 ### Bringing it up on hardware
 
@@ -1229,7 +1274,7 @@ keyboard lives by default, and prints the status. Reading the result:
 | `status=60` | done, timeout -- nothing answered. Check wiring and levels. |
 | `status=4x` | done, no timeout, `x` bytes returned. Working. |
 | collision set (`$0283` bit 0) | the bus reads low while the host has released it. A drive polarity that is inverted the wrong way looks exactly like this, because the host would hold the bus down permanently. |
-| `srq` set with nothing attached | the sense input is stuck low -- the symptom that revealed pin 26 was unusable. |
+| `srq` set with nothing attached | the sense input is stuck low -- the symptom that showed pin 26 (HDMI hot-plug detect) could not be used. |
 
 If a device answers but the data is wrong, the timings are all parameters on
 `adb_host` (`US_BIT`, `US_LOW_1`, `US_LOW_0`, `US_TLT_MAX`, `US_RX_THRESH`,
@@ -1492,8 +1537,8 @@ source; the R6501Q target still assembles byte-for-byte to the Rockwell ROMs.
   `test/blinky.v` and `test/btntest.v` still declare `led[5:0]` and will not
   place against the current `.cst`.
 * The I/O move to `$0200` touched the **mon tree** as well: `minimon.asm` now
-  assembles at `org=$e000` and `serial.asm` uses `ser_base = $0200`. That tree
-  is outside this repo.
+  assembles at `org=$e000`. Its `serial.asm` now drives the SCC at `$0820`.
+  That tree is outside this repo.
 * The simulation's UART monitor in `sim/tb_soc.v` drops characters on
   back-to-back output; hardware does not. Trust the board, not the sim, for
   anything that prints a lot.

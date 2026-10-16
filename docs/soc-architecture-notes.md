@@ -1,7 +1,15 @@
 # SoC architecture notes (65C816 core)
 
+> **Historical.** This is the early design discussion, kept for its
+> reasoning. Most of it has since been built: the cache, the burst SDRAM
+> controller, the peripheral bridge (`external_bus.v`) and the display as an
+> arbiter client. Some of it has been overtaken. The argument against split
+> I/D caches no longer holds, because self-modifying code is no longer a
+> constraint (see "Next" in `fpga/README.md`), and the 16-bit CPU data path
+> was measured and deprioritised. For the SoC as built see `fpga/README.md`;
+> for the target board see `Hardware.md`.
+
 Design discussion capturing the direction for building an SoC around this core.
-These are recommendations, not yet implemented.
 
 ## The split bus dissolves the protocol debate
 
@@ -47,7 +55,7 @@ Reject the 68000 *peripheral* model — its "ecosystem" is mostly 6800-bus parts
 accessed via the 68000's E/VMA/VPA synchronous-6800 cycle, so you'd adopt async
 DTACK + function codes for no peripheral payoff. **The one good 68000 idea is
 UDS̄/LDS̄ — byte strobes on a 16-bit data bus — and it belongs to the *memory*
-ide.** Steal exactly that. (Endianness: 65xx is little-endian, 68000
+side.** Steal exactly that. (Endianness: 65xx is little-endian, 68000
 big-endian; byte-lane mapping must follow 65xx — don't import 68000 lane
 conventions.)
 

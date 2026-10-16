@@ -22,8 +22,8 @@ TB       := sim/tb_soc.v sim/sdram_model.v sim/adb_kbd_model.v
 # Which image gets baked into the bitstream. Override to build a variant:
 #   make bit ROM=rom/memtest.mem
 ROM      ?= rom/minimon.mem
-# Memory map baked into the bitstream: 0 = minimon (8 KB ROM at $E000, 6551 at
-# $C000), 1 = Rockwell Forth (16 KB ROM at $C000, R6501 serial at $0015).
+# Memory map baked into the bitstream: 0 = minimon (8 KB ROM at $E000, I/O
+# block at $0200), 1 = Rockwell Forth (16 KB ROM at $C000, R6501 serial at $0015).
 MAP      ?= 0
 ROM_BITS ?= 13
 ROM_BASE ?= 16'hE000

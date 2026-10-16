@@ -18,15 +18,17 @@ IO_PORT "led" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
 // External peripheral bus (external_bus.v). 20 pins, scraped together from
 // three places on the board:
 //
-//   ext_d[7:0]  -- LCD connector pins, which have no components on them.
-//                  The data bus is bidirectional, so it goes here rather than
-//                  on the HSPI group below: it is the worst signal to have
-//                  contended if the BL616 ever drives its side.
+//   ext_d[7:0]  -- LCD connector pins, also on the edge headers. Two have
+//                  parts on them (Sipeed schematic rev 3923): pin 25 goes to
+//                  HDMI CEC through 100R, so a connected monitor sits on
+//                  ext_d[0]; pin 49 is the LCD backlight boost enable.
+//                  docs/Hardware.md moves ext_d[0] to pin 31.
 //   ext_a[3:0]  -- the freed LED pins.
-//   selects and control -- the BL616's HSPI interface (71-76, 86). CAUTION:
-//                  these are shared with the BL616 MCU. They are free only
-//                  while its firmware leaves HSPI idle; if a card misbehaves,
-//                  suspect contention here first.
+//   selects     -- 71-74, headers only (HSPI labels, but not wired to the
+//                  BL616).
+//   control     -- 75, 76 and 86 are the BL616's SPI link. CAUTION: they are
+//                  free only while its firmware leaves that link idle; if a
+//                  card misbehaves, suspect contention here first.
 //
 // ext_d is pulled up internally so an empty connector reads $FF rather than
 // whatever the pins float to. A card's driver trivially overrides a ~50k pull.
@@ -109,9 +111,10 @@ IO_PORT "tmds_d_p[2]" PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
 // instead of with an I/O hysteresis attribute -- there are ~2700 clocks per bit
 // cell, so there is plenty of time to spend on robustness.
 //
-// NOT pin 26: measured with a pull-up it reads LOW on this board, so something
-// holds it down and it is not usable as a free GPIO. Pins 27-30 were checked
-// and all float high (test/pintest.v puts candidate pins on the LEDs).
+// NOT pin 26: it reads LOW even with a pull-up, because it is the HDMI
+// hot-plug detect line (2.2k to the connector, 5.1k to ground). Pins 27-30
+// were checked and all float high (test/pintest.v puts candidate pins on the
+// LEDs).
 IO_LOC  "adb_drive" 27;
 IO_PORT "adb_drive" IO_TYPE=LVCMOS33 PULL_MODE=DOWN DRIVE=8;
 IO_LOC  "adb_sense" 28;
