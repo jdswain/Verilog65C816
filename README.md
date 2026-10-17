@@ -156,3 +156,18 @@ C; `tb_cpu.v`'s `irqh` does this and the suite exercises a mid-move IRQ.)
   are not undone (assert ABORT on the faulting access's address cycle, as on
   real hardware). The abort input is passed through one synchronizing flop.
 
+
+## Licence
+
+Copyright (C) Jason Swain.
+
+This source describes Open Hardware and is licensed under the CERN-OHL-S v2
+(strongly reciprocal); the full text is in `LICENSE`. You may redistribute and
+modify it and make products using it under the terms of that licence.
+
+It is distributed WITHOUT ANY EXPRESS OR IMPLIED WARRANTY, INCLUDING OF
+MERCHANTABILITY, SATISFACTORY QUALITY AND FITNESS FOR A PARTICULAR PURPOSE.
+Please see the CERN-OHL-S v2 for applicable conditions.
+
+The SID emulation in `fpga/rtl/sid/` is reDIP SID by Dag Lem, also CERN-OHL-S
+v2, with the changes listed in `fpga/rtl/sid/README.md`.

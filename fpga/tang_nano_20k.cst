@@ -119,3 +119,17 @@ IO_LOC  "adb_drive" 27;
 IO_PORT "adb_drive" IO_TYPE=LVCMOS33 PULL_MODE=DOWN DRIVE=8;
 IO_LOC  "adb_sense" 28;
 IO_PORT "adb_sense" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+
+// Sound: the onboard MAX98357A I2S amplifier (sound.v). Pins 54-56 double as
+// the SSPI configuration pins, so build.tcl sets use_sspi_as_gpio. Pin 51
+// drives the amplifier's SD_MODE through 0R: high plays the left channel,
+// low shuts it down. The same three I2S pins are on the edge header, so a
+// stereo DAC on a carrier board can share them.
+IO_LOC  "i2s_bclk" 56;
+IO_PORT "i2s_bclk" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
+IO_LOC  "i2s_lrck" 55;
+IO_PORT "i2s_lrck" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
+IO_LOC  "i2s_din"  54;
+IO_PORT "i2s_din"  IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
+IO_LOC  "amp_en"   51;
+IO_PORT "amp_en"   IO_TYPE=LVCMOS33 PULL_MODE=DOWN DRIVE=8;

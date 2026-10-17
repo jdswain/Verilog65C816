@@ -82,7 +82,9 @@ window for the external bus:
 | `$0340`-`$037F` | external bus control |
 | `$0380`-`$03BF` | video control (graphics/text mode) |
 | `$03C0`-`$03FF` | blitter |
-| `$0400`-`$07FF` | unclaimed, reads `$FF` |
+| `$0400`-`$04FF` | unclaimed, reads `$FF` |
+| `$0500`-`$057F` | sound: two SIDs and a control register (see [Sound](#sound)) |
+| `$0580`-`$07FF` | unclaimed, reads `$FF` |
 | `$0800`-`$0FFF` | external bus window: 4 cards x 16 registers |
 | &nbsp;&nbsp;`$0820`-`$082F` | emulated Z85C30 SCC, answering instead of card 2 (see [Serial: the SCC](#serial-the-scc)) |
 
@@ -678,7 +680,12 @@ looping over `$00E02E`-`$00E033` and `$00C001`, which is `ser_getc` polling the
 ACIA status register -- the monitor waiting for a keystroke.
 
 Timing closes with no violations -- setup and hold TNS both 0.000 across 0
-endpoints. **Fmax is 32.0 MHz against the 25.2 MHz system clock, 27% margin**.
+endpoints. **Fmax is 27.8 MHz against the 25.2 MHz system clock, 10% margin**,
+with the SIDs in. Placement varies a lot from build to build: the previous
+build, with nothing but a small change to the ADB controller between them,
+reached 35.5 MHz. Every one of the 25 worst paths runs inside the CPU, from its
+state register into the ALU's flags and A, X and Y, so that is the path to
+work on if the margin ever gets thin.
 It was 31.2 MHz before the SCC went in; see below.
 
 It had fallen to 3% (26.0 MHz) once the blitter was in. The path was
@@ -1037,6 +1044,72 @@ iverilog -g2005 -Irtl -Ptb_soc.TIMEOUT=60000000 \
 cd .. && vvp fpga/soc_con +screen +send=hello +times=7    # enough to scroll
 ```
 
+## Sound
+
+Two SIDs, played through the board's MAX98357A amplifier and speaker
+connector. The emulation is [reDIP SID](https://github.com/daglem/reDIP-SID)
+by Dag Lem (CERN-OHL-S v2), in `rtl/sid/` with the changes listed in its
+README; `rtl/sound.v` connects it to the SoC.
+
+| Address | Register |
+|---|---|
+| `$0500`-`$051F` | SID 1, laid out as `$D400`-`$D41F` on a C64 |
+| `$0520`-`$053F` | SID 2 |
+| `$0540` | control, mirrored to `$057F` |
+
+Control register:
+
+| Bit | Meaning |
+|---|---|
+| 0 | amplifier on (pin 51). Resets to 1 |
+| 1 | stereo: SID 1 left, SID 2 right. 0 (reset) puts the mix in both channels, for the mono amplifier |
+| 2 | SID 1 is an 8580 (0: 6581) |
+| 3 | SID 2 is an 8580 |
+| 6 | read: a write was lost because the queue was full. Writing the register clears it |
+| 7 | read: writes are still queued |
+
+* **Clock.** The SIDs run at 985248 Hz (PAL), a clock enable from the
+  25.2 MHz system clock, so the usual PAL frequency tables apply: 440 Hz is
+  `$1D45`.
+* **Writes are posted.** They go into a 64-entry queue, and one reaches the
+  SIDs each SID cycle, in order, so the CPU never waits. A full register
+  dump plays out within about 30 us, and timed tricks such as samples
+  through the volume register keep their timing. Bit 7 of the control
+  register says when the queue is empty.
+* **Reads never wait.** OSC3 (`$1B`) and ENV3 (`$1C`) of each SID are read
+  in idle SID cycles, so they return the latest value. POTX and POTY read
+  `$FF` (nothing is connected), and the write-only registers read 0.
+* **Audio.** Each SID gives a 24-bit sample every SID cycle. A one-pole
+  lowpass at about 20 kHz takes off most of what would alias, and I2S takes
+  49.2 kHz samples from it: BCLK is 25.2 MHz / 8, and a frame is 64 bits
+  with 24 used in each half. The amplifier plays the left channel.
+* **Stereo** needs a DAC on the same three pins, which are on the edge
+  header too; see the Sound section of `docs/Hardware.md`.
+
+From the monitor, a 440 Hz triangle on SID 1:
+
+```
+sm 505 09 f0        attack 0, decay 9, sustain 15, release 0
+sm 518 0f           volume 15
+sm 500 45 1d        frequency $1D45
+sm 504 11           triangle, gate on   (sm 504 10 to release it)
+```
+
+**Simulation.** Icarus cannot parse reDIP SID's SystemVerilog, so the
+simulations use `sim/sid_api_stub.v` in its place: same ports, takes writes
+the same way, no sound. `sim/tb_sound.v` tests `sound.v` against it (posted
+writes in order, the shadow reads, the control register, and mono and stereo
+I2S frames):
+
+```sh
+iverilog -g2005 -o sound_sim rtl/sound.v sim/sid_api_stub.v sim/tb_sound.v
+vvp sound_sim
+```
+
+**Synthesis** runs in SystemVerilog mode (`build.tcl`) for the SIDs; the rest
+of the design is plain Verilog-2001 and reads the same. Gowin finds the SID
+lookup tables relative to the source file.
+
 ## Serial: the SCC
 
 The console's serial port is channel A of a Z85C30 SCC, the SCC half of the
@@ -1211,7 +1284,7 @@ command register starts a transaction; length and data must be set up first.
 | `$0280` | command `AAAA CCRR` -- **write triggers the transaction** |
 | `$0281` | status `{busy, done, timeout, srq, count[3:0]}` |
 | `$0282` | length: bytes to send for a Listen |
-| `$0283` | write: bit 0 issues a 3 ms bus reset. read: bit 0 = collision |
+| `$0283` | write: bit 0 issues a 3 ms bus reset. read: bit 0 collision, bit 1 the line now (1 = high), bit 2 our drive now (1 = pulling low) |
 | `$0288`-`$028F` | data 0-7 |
 
 A command byte is address, command, register. `CC` = 11 Talk, 10 Listen; Flush
@@ -1228,6 +1301,7 @@ phase. Interrupts are not implemented -- poll `busy`.
 | data packet | `1` start bit, 2-8 bytes, `0` stop bit |
 | SRQ | device holds the line low past the command stop bit |
 | reset | 3 ms low |
+| idle | at least 3 ms between transactions (`US_IDLE`) |
 
 **Every duration is a parameter, deliberately.** The published figures disagree
 with each other -- Microchip's AN591 gives Tlt as both 65-160 us and 160-240 us
@@ -1236,6 +1310,18 @@ will need tuning against real hardware.
 
 Transmit is timed open-loop; receive is edge-driven, decoding each bit from how
 long the line was held low.
+
+**The bus rests between transactions.** A command written less than
+`US_IDLE` (3 ms) after the previous transaction ended is held, with busy set,
+until it has. The published figures give no minimum gap, but a real keyboard
+loses keys without one. Polled back to back, as MiniMon does at its prompt,
+it lost about half of them. It still answered every poll cleanly, so the
+missing keys were never sent at all. A 0.5 ms gap still lost one key in
+seven, while 2 ms lost none in a hundred. The gap is enforced in the
+controller, so every program that polls gets it. It is counted from the end
+of our last transaction, not from the line going high, so a bus held down
+still gets its command sent and reported as a collision, instead of waiting
+forever.
 
 ### Wiring
 
@@ -1252,7 +1338,23 @@ check; 27-30 all float high.
 
 ### Bringing it up on hardware
 
-The FPGA side is done and tested; what remains is the external circuit.
+**Working on a breadboard** with a 2N3904 and an Apple keyboard: Talk
+register 3 to device 2 returns `$6x $02` (a random address, then handler 2),
+and typing at MiniMon's prompt arrives without a key lost.
+
+`$0283` bits 1 and 2 show the line and the drive as they are now, which is
+what bringing the circuit up needs. `dm 283 1` should read `$02` with the
+line idle and `$04` while it is driven. Two things that misled the bring-up:
+
+* **MiniMon polls the keyboard continuously** while it waits at its prompt,
+  so the line is never idle there. A multimeter averages the pulses: pin 27
+  reads about 2V, the base about 0.5V and the data line about 1.9V, all with
+  a working circuit. Measure with the CPU held in a loop that leaves ADB
+  alone.
+* A Talk to register 0 times out whenever no key is waiting; that is
+  normal. Talk register 3 is the test: a keyboard always answers it.
+* **Keys lost while every reply is clean** means polls are too close
+  together (see the idle gap above), not a wiring fault.
 
 * `adb_drive` (**pin 27**) -> an inverting transistor that pulls the bus low.
   FPGA high = bus low. `PULL_MODE=DOWN` keeps the transistor off while the FPGA
@@ -1279,7 +1381,7 @@ keyboard lives by default, and prints the status. Reading the result:
 
 If a device answers but the data is wrong, the timings are all parameters on
 `adb_host` (`US_BIT`, `US_LOW_1`, `US_LOW_0`, `US_TLT_MAX`, `US_RX_THRESH`,
-`US_GLITCH` ...). Devices are allowed +/-30% tolerance and the published Tlt
+`US_GLITCH`, `US_IDLE` ...). Devices are allowed +/-30% tolerance and the published Tlt
 figures disagree with each other, so expect to tune `US_TLT_MAX` and
 `US_RX_THRESH` first.
 
@@ -1449,10 +1551,9 @@ iverilog -g2005 -o /tmp/sdsim rtl/sdram_ctrl.v sim/sdram_model.v sim/tb_sdram.v 
 
 ### Blocking demo work
 
-* **The keyboard is untested on hardware.** The monitor polls an ADB keyboard
-  and translates its keys, proven against a simulated one, but the external
-  level-shifting circuit does not exist yet. Expect to tune the `adb_host`
-  timing parameters when it does. Serial input stays until then.
+* **Keyboard input through MiniMon is untested on hardware.** The ADB host
+  talks to a real keyboard (see [Apple Desktop Bus](#apple-desktop-bus)), but
+  typing into the monitor has not yet been tried with a display attached.
 
 ### Performance
 

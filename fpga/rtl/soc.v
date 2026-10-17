@@ -27,7 +27,9 @@
 //   $0340-$037F   external bus control (external_bus.v)
 //   $0380-$03BF   video control (graphics/text mode)
 //   $03C0-$03FF   blitter (blitter.v)
-//   $0400-$07FF   unclaimed, reads $FF
+//   $0400-$04FF   unclaimed, reads $FF
+//   $0500-$057F   sound: two SIDs and a control register (sound.v)
+//   $0580-$07FF   unclaimed, reads $FF
 //   $0800-$0FFF   external bus window -- 4 cards x 16 registers:
 //                   $0800+$00.. card 0 (IO0#)   $0820.. card 2 (IO2#)
 //                   $0810..     card 1 (IO1#)   $0830.. card 3 (IO3#)
@@ -132,7 +134,12 @@ module soc #(
     output wire        ext_rw,
     output wire        ext_phi0,
     output wire        ext_res_n,
-    input  wire        ext_irq_n
+    input  wire        ext_irq_n,
+    // Sound: I2S to the board's MAX98357A, and its enable (see sound.v)
+    output wire        i2s_bclk,
+    output wire        i2s_lrck,
+    output wire        i2s_din,
+    output wire        amp_en
 );
     localparam [15:0] ROM_MASK = ~((16'd1 << ROM_BITS) - 16'd1);
     localparam integer MAP_MINIMON = 0;
@@ -217,6 +224,7 @@ module soc #(
     wire sel_extc = io_lo & (addr[10:6] == 5'd13);           // $0340-$037F
     wire sel_vid  = io_lo & (addr[10:6] == 5'd14);           // $0380-$03BF
     wire sel_blt  = io_lo & (addr[10:6] == 5'd15);           // $03C0-$03FF
+    wire sel_snd  = io_lo & (addr[10:7] == 4'b1010);         // $0500-$057F
     wire sel_r6501 = (MAP == MAP_FORTH) & bank0 & (addr[15:8] == 8'h00)
                    & (addr[7:0] >= 8'h15) & (addr[7:0] <= 8'h17);
     wire sel_ser  = sel_r6501;
@@ -481,6 +489,19 @@ module soc #(
     );
 
     //------------------------------------------------------------------
+    // Sound: two SIDs (reDIP SID, rtl/sid/) on the I2S amplifier
+    //------------------------------------------------------------------
+    wire [7:0] snd_q;
+
+    sound #(.SYS_HZ(SYS_HZ)) u_snd (
+        .clk(clk), .rst_n(rst_n),
+        .addr(addr[6:0]), .wdata(wdata), .rdata(snd_q),
+        .cs(stb & sel_snd), .we(we),
+        .i2s_bclk(i2s_bclk), .i2s_lrck(i2s_lrck), .i2s_din(i2s_din),
+        .amp_en(amp_en)
+    );
+
+    //------------------------------------------------------------------
     // External peripheral bus
     //
     // The window is $0800-$0FFF. Within it addr[5:4] picks one of the four
@@ -576,7 +597,7 @@ module soc #(
     // Anything unclaimed reads $FF: it takes the I/O path, and the palette,
     // the SD card slot and the empty ranges set none of the flops.
     //------------------------------------------------------------------
-    reg r_ser, r_adb, r_extc, r_sys, r_vid, r_blt, r_none;
+    reg r_ser, r_adb, r_extc, r_sys, r_vid, r_blt, r_snd, r_none;
 
     always @(posedge clk) if (stb) begin
         rom_r  <= sel_rom;
@@ -587,7 +608,9 @@ module soc #(
         r_sys  <= sel_sys;
         r_vid  <= sel_vid;
         r_blt  <= sel_blt;
-        r_none <= ~(sel_ser | sel_adb | sel_extc | sel_sys | sel_vid | sel_blt);
+        r_snd  <= sel_snd;
+        r_none <= ~(sel_ser | sel_adb | sel_extc | sel_sys | sel_vid | sel_blt
+                    | sel_snd);
     end
 
     // The ADB host's and the blitter's read data are combinational from the
@@ -605,6 +628,7 @@ module soc #(
                     | ({8{r_sys}}  & sys_q)
                     | ({8{r_vid}}  & vid_q)
                     | ({8{r_blt}}  & blt_q_r)
+                    | ({8{r_snd}}  & snd_q)
                     | {8{r_none}};
 
     always @* begin

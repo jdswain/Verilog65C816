@@ -32,11 +32,20 @@
 //   data       '1' start bit, 2..8 bytes, '0' stop bit
 //   SRQ        a device keeps the line low past the command stop bit
 //   reset      3 ms low
+//   idle       at least US_IDLE between transactions (see below)
 //
 // Every duration is a parameter, deliberately: the published figures disagree
 // with each other (AN591 gives Tlt as both 65-160 us and 160-240 us in
 // different paragraphs) and devices are allowed +/-30% tolerance, so they need
 // tuning against real hardware rather than baking in.
+//
+// A new command waits until the bus has been idle for US_IDLE. Apple's
+// figures give no minimum gap, but a real keyboard (tested on the breadboard
+// in October 2026) loses about half its keys when Talks follow each other
+// back to back: it answers cleanly, but some key events are never sent. A
+// 0.5 ms gap still lost one key in seven; 2 ms lost none in a hundred. The
+// gap is enforced here rather than in software, so every poller gets it; a
+// command written early is held, with busy set, until the bus has rested.
 //
 // Transmit is timed open-loop; receive is edge-driven, decoding each bit from
 // how long the line stayed low (a '0' holds low nearly twice as long as a '1').
@@ -56,6 +65,7 @@ module adb_host #(
     parameter integer US_SYNC      = 70,
     parameter integer US_TLT_MAX   = 300,   // give up waiting for a response
     parameter integer US_RESET     = 3000,
+    parameter integer US_IDLE      = 3000,  // bus rest before each command
     parameter integer US_RX_THRESH = 50,    // low longer than this reads as '0'
     parameter integer US_RX_END    = 150,   // no new bit by now: packet over
     parameter integer US_GLITCH    = 2      // reject transitions shorter than this
@@ -85,6 +95,7 @@ module adb_host #(
     localparam integer TICK_THRESH = PER_US * US_RX_THRESH;
     localparam integer TICK_RXEND  = PER_US * US_RX_END;
     localparam integer TICK_GLITCH = PER_US * US_GLITCH;
+    localparam integer TICK_IDLE   = PER_US * US_IDLE;
 
     localparam integer CW = 20;                  // covers the 3 ms reset
 
@@ -101,9 +112,6 @@ module adb_host #(
     reg       st_collision;
 
     wire [7:0] status = {st_busy, st_done, st_timeout, st_srq, st_count};
-    // Extended status: bit 0 is collision -- the bus was low while we had
-    // released it, outside the service-request window.
-    wire [7:0] status2 = {7'd0, st_collision};
 
     wire is_talk   = (cmd_r[3:2] == 2'b11);
     wire is_listen = (cmd_r[3:2] == 2'b10);
@@ -141,6 +149,15 @@ module adb_host #(
     wire bus_rise  = ~bus_filt_d & bus_filt;
 
     // We have released the line but it is still low: someone else is driving.
+    // Extended status, read at register 3:
+    //   bit 0  collision: the bus was low while we had released it, outside
+    //          the service-request window
+    //   bit 1  the bus as sensed now (synchronised, not deglitched); 1 = high
+    //   bit 2  what we are driving now; 1 = pulling the bus low
+    // Bits 1 and 2 are for bringing up the external circuit: with nothing in
+    // progress, bit 1 should read 1 and bit 2 0.
+    wire [7:0] status2 = {5'd0, adb_drive, sense_sync[1], st_collision};
+
     wire bus_contended = ~adb_drive & ~bus_level;
 
     //------------------------------------------------------------------
@@ -150,7 +167,7 @@ module adb_host #(
         S_IDLE  = 4'd0, S_ATTN  = 4'd1, S_SYNC  = 4'd2,
         S_TX_LO = 4'd3, S_TX_HI = 4'd4,
         S_TLT   = 4'd5, S_RX_LO = 4'd6, S_RX_HI = 4'd7,
-        S_RESET = 4'd8, S_FINISH= 4'd9;
+        S_RESET = 4'd8, S_FINISH= 4'd9, S_HOLD  = 4'd10;
 
     // what the bit currently being sent belongs to
     localparam [1:0] PH_CMD = 2'd0, PH_CMDSTOP = 2'd1,
@@ -167,6 +184,7 @@ module adb_host #(
     reg          got_start;
     reg [2:0]    rx_bit;
     reg [7:0]    rx_shift;
+    reg [CW-1:0] idle_cnt;              // how long the bus has rested
 
     integer i;
 
@@ -203,6 +221,7 @@ module adb_host #(
             got_start  <= 1'b0;
             rx_bit     <= 3'd0;
             rx_shift   <= 8'd0;
+            idle_cnt   <= {CW{1'b0}};
             for (i = 0; i < 8; i = i + 1) data_r[i] <= 8'd0;
         end else begin
             //----------------------------------------------------------
@@ -223,9 +242,8 @@ module adb_host #(
                     bit_idx    <= 4'd7;             // 7 bits after this one
                     byte_idx   <= 4'd0;
                     got_start  <= 1'b0;
-                    adb_drive  <= 1'b1;             // attention
-                    timer      <= TICK_ATTN[CW-1:0];
-                    state      <= S_ATTN;
+                    timer      <= {CW{1'b0}};
+                    state      <= S_HOLD;           // attention once rested
                     cur_bit    <= wdata[7];
                     phase      <= PH_CMD;
                 end
@@ -249,6 +267,12 @@ module adb_host #(
             end else begin
                 case (state)
                 S_IDLE: ;
+
+                S_HOLD: if (idle_cnt >= TICK_IDLE[CW-1:0]) begin
+                    adb_drive <= 1'b1;              // attention
+                    timer     <= TICK_ATTN[CW-1:0];
+                    state     <= S_ATTN;
+                end
 
                 S_ATTN: begin
                     adb_drive <= 1'b0;
@@ -349,6 +373,15 @@ module adb_host #(
                 default: state <= S_IDLE;
                 endcase
             end
+
+            // The bus rests from the end of one transaction to the start of
+            // the next. The line level is deliberately not consulted: a bus
+            // held down would otherwise keep a command waiting forever, where
+            // sending it reports the fault as a collision.
+            if (state != S_IDLE && state != S_HOLD)
+                idle_cnt <= {CW{1'b0}};
+            else if (idle_cnt < TICK_IDLE[CW-1:0])
+                idle_cnt <= idle_cnt + 1'b1;
 
             //----------------------------------------------------------
             // Receive: edge driven, so it runs outside the timer gating.

@@ -55,6 +55,11 @@ module top_tang20k #(
     output wire        ext_phi0,
     output wire        ext_res_n,
     input  wire        ext_irq_n,
+    // Sound: I2S to the onboard MAX98357A; amp_en drives its SD_MODE.
+    output wire        i2s_bclk,
+    output wire        i2s_lrck,
+    output wire        i2s_din,
+    output wire        amp_en,
     // HDMI. A differential pair takes both pin numbers on the _p port only.
     output wire        tmds_clk_p,
     output wire        tmds_clk_n,
@@ -156,7 +161,9 @@ module top_tang20k #(
         .ext_a(ext_a), .ext_d_in(ext_d_in), .ext_d_out(ext_d_out),
         .ext_d_oe(ext_d_oe), .ext_sel_n(ext_sel_n),
         .ext_rw(ext_rw), .ext_phi0(ext_phi0),
-        .ext_res_n(ext_res_n), .ext_irq_n(ext_irq_n)
+        .ext_res_n(ext_res_n), .ext_irq_n(ext_irq_n),
+        .i2s_bclk(i2s_bclk), .i2s_lrck(i2s_lrck), .i2s_din(i2s_din),
+        .amp_en(amp_en)
     );
 
     assign led = ~led_active_high;

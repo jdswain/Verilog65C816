@@ -18,7 +18,9 @@ TOP      := top_tang20k
 ROOT     := ..
 RTL      := $(ROOT)/cpu_65c816.v $(wildcard rtl/*.v)
 IFLAGS   := -Irtl
-TB       := sim/tb_soc.v sim/sdram_model.v sim/adb_kbd_model.v
+# sid_api_stub.v stands in for the SIDs (rtl/sid/), whose SystemVerilog
+# Icarus cannot parse.
+TB       := sim/tb_soc.v sim/sdram_model.v sim/adb_kbd_model.v sim/sid_api_stub.v
 # Which image gets baked into the bitstream. Override to build a variant:
 #   make bit ROM=rom/memtest.mem
 ROM      ?= rom/minimon.mem
@@ -70,7 +72,7 @@ send: soc_sim
 	@cd $(ROOT) && $(VVP) fpga/soc_sim +send=$(S)
 
 lint: $(RTL) $(ROM_VH)
-	$(IVERILOG) -g2005 $(IFLAGS) -s lint_top -o /dev/null $(RTL) sim/lint_top.v $(GOWIN_SIM)
+	$(IVERILOG) -g2005 $(IFLAGS) -s lint_top -o /dev/null $(RTL) sim/lint_top.v sim/sid_api_stub.v $(GOWIN_SIM)
 
 # The assembler resolves includes relative to the source file and stores the
 # cwd in a 100-byte buffer, so it must run from the source directory and the

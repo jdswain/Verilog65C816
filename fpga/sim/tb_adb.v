@@ -163,6 +163,7 @@ module tb_adb;
 
     //------------------------------------------------------------------
     reg [7:0] st, d0, d1;
+    realtime  t_write;
 
     initial begin
         repeat (4) @(posedge clk); rst_n = 1;
@@ -195,7 +196,17 @@ module tb_adb;
         end
 
         // ---------------- Talk to a device that is not there ----------------
+        // Written straight after the last transaction, so it must be held
+        // until the bus has rested for US_IDLE (3 ms) before the attention.
+        t_write = $realtime;
         wr(4'h0, 8'h5C);                          // device 5, Talk r0
+        @(negedge bus);
+        $display("idle hold: attention %0.0f us after the write",
+                 ($realtime - t_write) / 1000.0);
+        if (($realtime - t_write) / 1000.0 < 2900.0) begin
+            $display("FAIL: command sent without the bus resting first");
+            errors = errors + 1;
+        end
         st = 8'hFF;
         while (st[7]) begin #(50 * US); rd(4'h1, st); end
         $display("no device: status=%02x (timeout=%b)", st, st[5]);
@@ -236,7 +247,9 @@ module tb_adb;
             dev_transaction(8'h02, 8'h96, 8'h69);
             begin
                 wr(4'h0, 8'h2C);
-                #(1900 * US);          // attention + sync + command + stop
+                // The attention starts once the bus has rested, then
+                // attention + sync + command + stop take ~1770 us.
+                @(negedge bus); #(1800 * US);
                 glitching = 1;         // now the device is replying
                 st = 8'hFF;
                 while (st[7]) begin #(50 * US); rd(4'h1, st); end

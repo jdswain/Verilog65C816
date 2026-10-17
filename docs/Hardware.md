@@ -26,13 +26,13 @@ Each item is marked:
 | Video, 640x480 HDMI, text and 16-colour graphics | | FPGA | Built |
 | Blitter | | FPGA | Built |
 | Console serial | Z85C30 SCC channel A | Emulated in the FPGA on the BL616 USB bridge; later the real chip | Emulation built; it replaced the ACIA |
-| Keyboard and mouse | ADB host | FPGA, plus a transistor and level shifter | FPGA side built; circuit not built |
+| Keyboard and mouse | ADB host | FPGA, plus a transistor and level shifter | Working on a breadboard |
 | Two serial ports (one internal, one external) | Z85C80 SCC half | Carrier | Proposed |
 | SCSI (one internal, one external connector) | Z85C80 SCSI half (53C80) | Carrier | Proposed |
 | Floppy (one internal port, two drives) | 82077AA | Carrier | Proposed |
 | DMA, two channels | | FPGA | Proposed |
 | Interrupt status and mask | | FPGA | Proposed |
-| Sound, one or two SIDs | | FPGA, onboard I2S amplifier | Open: proposed below |
+| Sound, two SIDs | reDIP SID emulation | FPGA, onboard I2S amplifier; stereo DAC optional on the carrier | Built |
 | Ethernet | W5100S | Carrier, on the external bus | Open: proposed below |
 | SD card | | | **Not used**; its pins are free |
 | Encryption engine, keyboard power-on | | | Open |
@@ -372,35 +372,43 @@ rates: 115200 is a time constant of 0 at x16.
 
 ## Sound
 
-**Open; proposed:** one or two SIDs emulated in the FPGA, played through
-the board's own amplifier. **It needs no new pins.**
+**Built:** two SIDs emulated in the FPGA, played through the board's own
+amplifier, with **no new pins**. The emulation is reDIP SID (Dag Lem,
+CERN-OHL-S v2) in `fpga/rtl/sid/`; `fpga/rtl/sound.v` connects it, and the
+Sound section of `fpga/README.md` has the registers.
 
 The Tang Nano 20K has a MAX98357A I2S amplifier (mono, about 3W) with a
-speaker connector. Its four pins aren't used by the design today:
+speaker connector:
 
 | Pin | Signal |
 |---|---|
 | 56 | I2S BCLK |
 | 55 | I2S LRCK |
 | 54 | I2S DIN |
-| 51 | amplifier shutdown and channel select (`SD`) |
+| 51 | the amplifier's `SD_MODE`, through 0R: high plays the left channel, low shuts it down |
 
-* Pins 54-56 double as the FPGA's SSPI configuration pins. The build needs
-  "use SSPI as regular I/O" (`set_option -use_sspi_as_gpio 1` in
-  `build.tcl`).
-* The amplifier is mono, so two SIDs are mixed into one channel.
+* Pins 54-56 double as the FPGA's SSPI configuration pins; `build.tcl` sets
+  "use SSPI as regular I/O".
 * I2S from the 25.2 MHz system clock with no PLL: BCLK = 25.2 MHz / 8 =
-  3.15 MHz, 64 bits a frame, so 49.2 kHz samples. The MAX98357A takes 8 to
-  96 kHz.
-* The SID's own clock (about 1 MHz) is a clock enable from 25.2 MHz with a
-  fractional divider. Pitch is then exact to within the divider's
-  resolution.
-* **Resources:** the design uses about 60% of the logic and none of the DSP
-  multipliers. The filter is the expensive part of a SID, and the
-  multipliers suit it. Two SIDs will be tight. **Check** by synthesising
-  one.
-* **Registers (proposed):** 32 bytes each at `$0500` and `$0520`, laid out
-  as the SID's own registers.
+  3.15 MHz, 64 bits a frame, 49.2 kHz samples, 24-bit words.
+* The SID clock is a clock enable of 985248 Hz (PAL) from 25.2 MHz.
+* **Mono or stereo**, chosen by a control bit. Mono (the reset state) puts
+  the mix of both SIDs in both channels, which is what the onboard amplifier
+  plays. Stereo puts SID 1 left and SID 2 right.
+* **Resources:** about 2,000 logic cells, 7 block RAMs and 1.5 DSP blocks.
+  With it the design uses 70% of the logic and 23 of 46 block RAMs, and
+  meets timing at 25.2 MHz with Fmax 35 MHz.
+
+### Stereo on the carrier
+
+I2S carries both channels on the same three lines, and pins 54-56 are on the
+edge header as well as at the amplifier. A stereo DAC on the carrier can
+therefore share them, with **no new pins**:
+
+* A **PCM5102A** suits: 3.3V, I2S, no master clock (it locks to BCLK, and
+  takes 64 bits a frame), line output.
+* The control register's stereo bit sends the SIDs to separate channels;
+  pin 51 low mutes the onboard speaker meanwhile.
 
 ## Ethernet
 
@@ -421,8 +429,12 @@ controller would have to be built. The W5100S on the bus is simpler.
 
 ## ADB
 
-The FPGA side is built and simulated (`rtl/adb_host.v`). The circuit is not
-built.
+The FPGA side is built (`rtl/adb_host.v`), and the circuit below **works on
+a breadboard** with a 2N3904 and an Apple keyboard, which answers Talk
+register 3 and types without losing keys. Base: 1kΩ from pin 27 and 1kΩ to
+ground; R3 1kΩ to +5V. The keyboard needs the bus idle for a few
+milliseconds between transactions, and the controller enforces this (see
+`fpga/README.md`).
 
 * **`adb_drive`, pin 27:** an NPN transistor or N-MOSFET that pulls the bus
   low.
@@ -662,9 +674,16 @@ to the section that explains it.
 - [ ] Test points on 5V, 3.3V and ground.
 - [ ] Jumpers or 0R links to isolate each chip's interrupt and DMA lines.
 
+### Stereo audio (optional)
+
+- [ ] A PCM5102A stereo DAC on the I2S lines from the edge header: BCLK
+      (56), LRCK (55), DIN (54). Its SCK pin tied low, so it locks to BCLK
+      ([Stereo on the carrier](#stereo-on-the-carrier)).
+- [ ] Line-out jack, with the DAC's recommended output filter.
+
 ### Not on the carrier
 
-- Sound uses the Tang Nano's own amplifier and speaker connector.
+- Mono sound uses the Tang Nano's own amplifier and speaker connector.
 - The SD card is not used.
 
 ## Still to do
@@ -679,7 +698,7 @@ to the section that explains it.
      crystal
 3. Decide the **Open** items: serial line drivers, the console's home once
    the carrier exists, the external SCSI connector, power, SCC DMA, and
-   whether to build the sound and Ethernet as proposed.
+   whether to build the Ethernet as proposed.
 4. RTL changes:
    * Intel-only `external_bus.v` at the 8 MHz timing, with the SCC recovery
      hold-off
@@ -688,4 +707,3 @@ to the section that explains it.
    * the DMA engine and its multiplexer on the memory-master port
    * the interrupt register
    * the `.cst` pin moves
-   * sound: SIDs, I2S, and the SSPI build option
