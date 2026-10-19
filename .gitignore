@@ -22,3 +22,7 @@ impl/
 !/fpga/rom/minimon.mem
 !/fpga/rom/font_st8x16.hex
 !/fpga/rom/mon-fixes/
+
+# RAM programs: keep the sources
+/fpga/apps/*.hex
+/fpga/apps/*.lst

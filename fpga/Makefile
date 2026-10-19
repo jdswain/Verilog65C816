@@ -51,7 +51,7 @@ BIT      := impl/pnr/soc816.fs
 PROG     := $(GOWIN)/Programmer/bin/programmer_cli
 DEVICE   := GW2AR-18C
 
-.PHONY: all sim real send lint rom image show memtest exttest romswitch adbtest fbtest maptest imgload texttest blttest font forth forth-load forth-rom forth-bit bit prog boot talk flash scan clean
+.PHONY: all sim real send lint rom image show memtest exttest romswitch adbtest fbtest maptest imgload texttest blttest font forth forth-load forth-rom forth-bit mandel mandel-load bit prog boot talk flash scan clean
 
 all: sim
 
@@ -92,6 +92,18 @@ forth:
 
 forth-load: forth
 	python3 tools/mload.py rom/forth.hex $(FORTH_ENTRY) $(if $(L),"$(L)")
+
+# Programs that run in RAM under MiniMon, in apps/. `make mandel` assembles
+# the Mandelbrot viewer to apps/mandel.hex; `make mandel-load` sends it with
+# MiniMon's ld and starts it at $2000, then passes the terminal through (its
+# keys work from the terminal as well as the ADB keyboard) until control-].
+apps/mandel.hex: apps/mandel.asm rom/mon-fixes/65816.asm
+	cd apps && $(AS816) -o mandel.hex mandel.asm
+
+mandel: apps/mandel.hex
+
+mandel-load: apps/mandel.hex
+	python3 tools/mload.py apps/mandel.hex 2000
 
 # The same Forth as a ROM at $C000 in place of the monitor, and the bitstream
 # with it. The 65C02 build runs in emulation mode against the R6501 serial
