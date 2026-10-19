@@ -881,6 +881,36 @@ preview looks narrow too). Use `4:3` for a monitor that keeps the pixels
 square. `IMG_BACK` is the colour around the picture: `edge`, the default, takes
 it from the picture's top left corner, or give it as `RRGGBB`.
 
+### Mandelbrot viewer
+
+`apps/mandel.asm` is a program for the monitor rather than a ROM: it draws
+the Mandelbrot set in graphics mode, and you can move around it and zoom in.
+
+```sh
+make mandel-load    # assemble, load at $2000 with tools/mload.py, and run
+```
+
+| Key | Does |
+|---|---|
+| arrows or WASD | move a quarter of the screen |
+| `+` or `=`, `-` | zoom in, zoom out |
+| `>` or `.`, `<` or `,` | 32 more or fewer iterations (32 to 512) |
+| `R` | back to the starting view |
+| `Q` | quit to the monitor |
+
+Keys come from the serial port (the arrows as ANSI escape sequences) or from
+the ADB keyboard. Any key starts the picture again from the top, so there is
+no need to wait for a draw to finish. On quitting, the viewer restores the
+default palette and text mode and clears the screen.
+
+The arithmetic is 16-bit fixed point with 13 fraction bits, which allows
+coordinates up to ±4. Multiplication uses a 32 KB table of squares built at
+`$4000` when the program starts: x² and y² come from the table, and
+2xy = 4((x+y)/2)² − x² − y², which is exact modulo 2¹⁶. The zoom stops at one
+fixed-point step (1/8192) per pixel, five zooms in from the whole set, or
+about 44 times. The direct page is moved to `$3F00`, so
+the program uses nothing in the monitor's low memory.
+
 ## Monitor commands
 
 **Running on hardware.**
