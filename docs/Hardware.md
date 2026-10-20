@@ -495,6 +495,15 @@ MiniMon, Business Basic, Rockwell Forth and the test ROMs use it.
 em16 (65Tools) emulates the SCC as well (`EmSCC.Mod`), so Business Basic's
 test suite runs against it.
 
+em16 also emulates the carrier's disk controllers at the addresses above, for
+polled drivers to be written before the carrier exists:
+* the 82077AA at `$0800` (`Em82077.Mod`), with two floppy drives (`-disk0`,
+  `-disk1`)
+* the 53C80 at `$0830` (`EmSCSI.Mod`), with a disk at SCSI ID 0 (`-scsi`)
+
+Neither emulates DMA. The 65Tools README covers both under "Disks under
+-fpga".
+
 ### Later
 
 The same approach suits the other carrier devices if software needs them
