@@ -27,6 +27,11 @@
 //     cross banks even in emulation mode).
 //   - The V flag in decimal mode is computed as for binary arithmetic.
 //   - VPA/VDA/VPB/MLB status outputs and ABORT are not provided.
+//
+// Extension: banked direct page and stack (docs/BankedDP.md). WDM $B1 sets
+// the mode, WDM $B0 clears it (reset clears it; other WDMs stay no-ops). In
+// native mode with the mode set, D is a page number: the direct page is at
+// {D, $00} and the stack at {DH, S}, so both leave bank 0 together.
 //============================================================================
 
 `default_nettype none
@@ -67,6 +72,7 @@ module cpu_65c816 (
     reg [15:0] PC;
     reg [7:0]  DBR, PBR;
     reg fC, fZ, fI, fD, fX, fM, fV, fN, fE;
+    reg xb;              // banked direct page and stack (WDM $B1 / $B0)
 
     wire m16 = ~fE & ~fM;     // 16-bit accumulator/memory
     wire x16 = ~fE & ~fX;     // 16-bit index registers
@@ -161,6 +167,7 @@ module cpu_65c816 (
     reg        abort_pend;       // an abort is pending for the running instr
     reg [15:0] sA, sX, sY, sS, sD, sPC;
     reg [7:0]  sDBR, sPBR;
+    reg        sxb;
     reg        sfN, sfV, sfM, sfX, sfD, sfI, sfZ, sfC, sfE;
 
     // ABORT may be recognized during any instruction-execution state, but not
@@ -452,12 +459,19 @@ module cpu_65c816 (
     // cross the page boundary.
     wire dpw = fE & (D[7:0] == 8'h00);
 
+    // banked mode (native only): the direct page is at {D, $00} and the
+    // stack at {DH, S}. dbase is the direct page's offset in its bank,
+    // dbank the bank of the direct page, the stack and their pointers.
+    wire        bk    = xb & ~fE;
+    wire [15:0] dbase = bk ? {D[7:0], 8'h00} : D;
+    wire [7:0]  dbank = bk ? D[15:8] : 8'h00;
+
     // common address helpers
     wire [23:0] taddr1   = wrap16 ? {taddr[23:16], taddr[15:0] + 16'd1}
                                   : taddr + 24'd1;
-    wire [23:0] sp_push  = (fE & ~stk16) ? {16'h0001, S[7:0]} : {8'h00, S};
+    wire [23:0] sp_push  = (fE & ~stk16) ? {16'h0001, S[7:0]} : {dbank, S};
     wire [23:0] sp_pull  = (fE & ~stk16) ? {16'h0001, S[7:0] + 8'd1}
-                                         : {8'h00, S + 16'd1};
+                                         : {dbank, S + 16'd1};
     wire [15:0] pcn      = PC + 16'd1;   // PC after the current operand byte
 
     // P register byte (brkbit: value of bit4 in emulation mode)
@@ -647,7 +661,8 @@ module cpu_65c816 (
             end
             OP_REP: set_p(pbyte(fX) & ~m[7:0]);
             OP_SEP: set_p(pbyte(fX) |  m[7:0]);
-            default: ;                           // OP_NOP (WDM)
+            default:                             // OP_NOP: WDM
+                if (m[7:1] == 7'b1011000) xb <= m[0];    // WDM $B0 / $B1
             endcase
         end
     endtask
@@ -741,7 +756,7 @@ module cpu_65c816 (
         begin
             pb = {sfN, sfV, sfE ? 1'b1 : sfM, sfE ? 1'b0 : sfX,
                   sfD, sfI, sfZ, sfC};
-            A <= sA; X <= sX; Y <= sY; S <= sS; D <= sD; DBR <= sDBR;
+            A <= sA; X <= sX; Y <= sY; S <= sS; D <= sD; DBR <= sDBR; xb <= sxb;
             fN <= sfN; fV <= sfV; fM <= sfM; fX <= sfX;
             fZ <= sfZ; fC <= sfC; fE <= sfE;
             if (sfE) begin push_q <= {sPC, pb, 8'h00}; push_n <= 3'd3; end
@@ -821,7 +836,7 @@ module cpu_65c816 (
             fC <= 1'b0; fZ <= 1'b0; fV <= 1'b0; fN <= 1'b0;
             A <= 16'h0000; X <= 16'h0000; Y <= 16'h0000;
             S <= 16'h01FF; D <= 16'h0000; DBR <= 8'h00; PBR <= 8'h00;
-            PC <= 16'h0000; IR <= 8'h00;
+            PC <= 16'h0000; IR <= 8'h00; xb <= 1'b0; sxb <= 1'b0;
             {d_mode, d_cls, d_op} <= dec(8'h00);
             tlo <= 8'h00; tmid <= 8'h00; tptr <= 16'h0000;
             ptr_bank <= 8'h00; taddr <= 24'h0; wrap16 <= 1'b0;
@@ -862,7 +877,7 @@ module cpu_65c816 (
                     end else begin
                         // snapshot the pre-instruction state for ABORT
                         sPC <= PC; sPBR <= PBR;
-                        sA <= A; sX <= X; sY <= Y; sS <= S; sD <= D; sDBR <= DBR;
+                        sA <= A; sX <= X; sY <= Y; sS <= S; sD <= D; sDBR <= DBR; sxb <= xb;
                         sfN<=fN; sfV<=fV; sfM<=fM; sfX<=fX;
                         sfD<=fD; sfI<=fI; sfZ<=fZ; sfC<=fC; sfE<=fE;
                         PC <= PC + 16'd1;
@@ -959,8 +974,8 @@ module cpu_65c816 (
                     8'h44, 8'h54: begin DBR <= rdata; state <= S_OP2; end  // MVP/MVN dest bank
                     8'h62, 8'hF4, 8'h82: begin tlo <= rdata; state <= S_OP2; end // PER/PEA/BRL
                     8'hD4: begin                                           // PEI
-                        tptr <= dpw ? {D[15:8], rdata} : D + {8'h00, rdata};
-                        ptr_bank <= 8'h00;
+                        tptr <= dpw ? {D[15:8], rdata} : dbase + {8'h00, rdata};
+                        ptr_bank <= dbank;
                         state <= S_PTRL;
                     end
                     default: case (d_mode)
@@ -971,51 +986,48 @@ module cpu_65c816 (
                     MD_IMM:
                         if (rd16) begin tlo <= rdata; state <= S_OP2; end
                         else begin exec_rd({8'h00, rdata}); state <= S_FETCH; end
-                    // Direct-page modes: when E=1 and DL=0, the effective
-                    // address (and any pointer fetched from it) wraps within
-                    // page 0 with high byte = DH; otherwise it is a 16-bit add
-                    // in bank 0.
                     // Direct-page modes: when E=1 and DL=0 the base offset
                     // (dp + index) wraps within page 0 with high byte = DH;
-                    // otherwise it is a 16-bit add in bank 0. The word/pointer
-                    // upper bytes are always fetched at base+1 (16-bit).
+                    // otherwise it is a 16-bit add in bank 0 (from dbase in
+                    // dbank, in banked mode). The word/pointer upper bytes
+                    // are always fetched at base+1 (16-bit).
                     MD_DP: begin
                         taddr <= dpw ? {8'h00, D[15:8], rdata}
-                                     : {8'h00, D + {8'h00, rdata}};
+                                     : {dbank, dbase + {8'h00, rdata}};
                         wrap16 <= 1'b1;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
                     MD_DPX: begin
                         taddr <= dpw ? {8'h00, D[15:8], rdata + X[7:0]}
-                                     : {8'h00, D + {8'h00, rdata} + X};
+                                     : {dbank, dbase + {8'h00, rdata} + X};
                         wrap16 <= 1'b1;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
                     MD_DPY: begin
                         taddr <= dpw ? {8'h00, D[15:8], rdata + Y[7:0]}
-                                     : {8'h00, D + {8'h00, rdata} + Y};
+                                     : {dbank, dbase + {8'h00, rdata} + Y};
                         wrap16 <= 1'b1;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
                     MD_SR: begin
-                        taddr <= {8'h00, S + {8'h00, rdata}};
+                        taddr <= {dbank, S + {8'h00, rdata}};
                         wrap16 <= 1'b1;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
                     MD_IDX: begin
                         tptr <= dpw ? {D[15:8], rdata + X[7:0]}
-                                    : D + {8'h00, rdata} + X;
-                        ptr_bank <= 8'h00;
+                                    : dbase + {8'h00, rdata} + X;
+                        ptr_bank <= dbank;
                         state <= S_PTRL;
                     end
                     MD_IDP, MD_IDY, MD_IDL, MD_ILY: begin
                         tptr <= dpw ? {D[15:8], rdata}
-                                    : D + {8'h00, rdata};
-                        ptr_bank <= 8'h00;
+                                    : dbase + {8'h00, rdata};
+                        ptr_bank <= dbank;
                         state <= S_PTRL;
                     end
                     MD_SRY: begin
-                        tptr <= S + {8'h00, rdata}; ptr_bank <= 8'h00;
+                        tptr <= S + {8'h00, rdata}; ptr_bank <= dbank;
                         state <= S_PTRL;
                     end
                     default: begin tlo <= rdata; state <= S_OP2; end

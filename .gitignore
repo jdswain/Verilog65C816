@@ -8,6 +8,8 @@ __pycache__/
 /sim
 /sim_harte
 /test.hex
+/banked.mem
+/banked.lst
 /harte/bin/
 
 # FPGA: Gowin output, built simulators, waveforms

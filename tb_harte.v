@@ -143,6 +143,7 @@ module tb_harte;
                 dut.X = i_p[4] ? {8'h00, i_x[7:0]} : i_x;
                 dut.Y = i_p[4] ? {8'h00, i_y[7:0]} : i_y;
             end
+            dut.xb = 1'b0;                     // banked mode off
             dut.state = 5'd0;                 // S_FETCH
             dut.nmi_pend = 1'b0;
             dut.irq1 = 1'b1; dut.irq2 = 1'b1;

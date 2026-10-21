@@ -131,8 +131,14 @@ module tb_cpu;
         end
     end
 
+    // the memory image: test.hex, or +hex=file (make banked)
+    // (zeroed first: an image shorter than the memory leaves no x behind)
+    reg [8*256-1:0] hexfile;
+    integer k;
     initial begin
-        $readmemh("test.hex", mem);
+        for (k = 0; k < 131072; k = k + 1) mem[k] = 8'h00;
+        if (!$value$plusargs("hex=%s", hexfile)) hexfile = "test.hex";
+        $readmemh(hexfile, mem);
         rst_n = 1'b0;
         repeat (4) @(posedge clk);
         rst_n <= 1'b1;

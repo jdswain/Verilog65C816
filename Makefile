@@ -12,7 +12,14 @@ sim: cpu_65c816.v tb_cpu.v
 run: sim test.hex
 	$(VVP) sim
 
-clean:
-	rm -f sim test.hex
+# the banked direct page and stack (docs/BankedDP.md)
+banked.mem: banked.s
+	../65Tools/bin/as -D BENCH=1 -o $@ banked.s > /dev/null
 
-.PHONY: all run clean
+banked: sim banked.mem
+	$(VVP) sim +hex=banked.mem
+
+clean:
+	rm -f sim test.hex banked.mem
+
+.PHONY: all run banked clean

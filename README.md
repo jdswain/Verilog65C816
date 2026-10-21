@@ -15,6 +15,7 @@ than the original part.
 | `test_gen.py`  | Generates `test.hex`: a hand-assembled program with 64 self-checks |
 | `tb_harte.v`   | Testbench that runs the SingleStepTests (TomHarte) vectors |
 | `harte_run.py` | Downloads, converts, runs and aggregates the TomHarte vectors |
+| `banked.s`     | Checks of the banked direct page and stack (`make banked`) |
 | `Makefile`     | `make run` builds with Icarus Verilog and runs the test suite |
 
 ## Running the tests
@@ -22,6 +23,7 @@ than the original part.
 ```sh
 make run            # expects iverilog/vvp and python3 on PATH
 vvp sim +trace=200  # optional: print the first 200 bus cycles
+make banked         # the banked direct page and stack: PASS  (642 cycles)
 ```
 
 Expected output: `PASS  (1410 cycles)`. The 70 checks cover all addressing
@@ -46,6 +48,11 @@ IRQ/NMI, WAI/STP, and ABORT (write suppressed + instruction retried).
   faults.
 - Bus-cycle classification pins (W65C816 style): VPA/VDA (program vs data vs
   internal vs opcode-fetch), VPB (vector pull), MLB (memory lock during RMW).
+- An extension, off at reset: **banked direct page and stack**
+  ([docs/BankedDP.md](docs/BankedDP.md)). After `WDM #$B1`, in native mode,
+  D holds a bank and page: the direct page is at `DH:DL:00` and the stack at
+  `DH:S`, so each process of a multitasking system can have both in its own
+  bank. `WDM #$B0` turns it off again.
 
 ## Bus interface
 
