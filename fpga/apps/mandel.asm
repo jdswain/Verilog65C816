@@ -32,7 +32,7 @@
 	org=$2000
 
 	sq        = $4000		;the table: (i*i) >> 13 for i < 16384, 32 KB
-	dpage     = $3F00		;our direct page
+	dpage     = $003F		;our direct page, $00:3F00 (banked: bank, page)
 
 	screen    = $700000
 	vid_mode  = $0380		;bit 0: 1 = text
@@ -90,6 +90,7 @@
 start	php
 	phb
 	phd
+	wdm #$b1		;banked, as MiniMon leaves it (an older one doesn't)
 	rep #$20
 	longa = on
 	lda #dpage

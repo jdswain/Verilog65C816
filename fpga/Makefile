@@ -33,9 +33,9 @@ ROM_VH   := rtl/rom_path.vh
 # Text-mode font, built from the EmuTOS source by `make font`.
 FONT     := rom/font_st8x16.hex
 
-# Where the monitor sources live. `make rom` needs the fixes described in
-# fpga/README.md applied there.
-MON_DIR  ?= $(HOME)/Developer/1av/65/mon/src
+# Where the monitor sources live: MiniMon is rom/ of the OS16 repository
+# (github.com/jdswain/OS16), beside this one.
+MON_DIR  ?= $(HOME)/Developer/1av/65/OS16/rom
 
 # Real board ratio: 27 MHz crystal, 115200 baud.
 REAL_PARAMS := -Ptb_soc.DIVISOR=234 -Ptb_soc.CLK_HALF=19 \

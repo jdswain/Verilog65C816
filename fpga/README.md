@@ -581,10 +581,14 @@ input is the fix when that starts to matter.
 ## Building the ROM
 
 ```sh
-make rom MON_DIR=/path/to/mon/src
+make rom                       # MON_DIR=~/Developer/1av/65/OS16/rom
+make rom MON_DIR=/path/to/rom  # elsewhere
 ```
 
-This assembles the monitor into `rom/minimon.mem`.
+This assembles the monitor into `rom/minimon.mem`. MiniMon's sources are
+`rom/` of the OS16 repository ([jdswain/OS16](https://github.com/jdswain/OS16)),
+checked out beside this one; `make` there builds the same image, and an 8K
+binary of it for `em16 -fpga -bootrom`.
 
 The sources are in the syntax of the current (Oberon) 65Tools assembler:
 section names are quoted (`section "text"`), there is no `entry` directive, and
@@ -592,17 +596,18 @@ an undefined symbol is an error. The older C assembler accepted a branch to an
 undefined symbol and assembled it to nothing, which is what made the
 transmitter drop every other character before the fix in `rom/mon-fixes/`.
 
-## Monitor fixes required
+## Monitor fixes
 
-`rom/mon-fixes/` holds what the monitor needed before it would build and run.
-These are changes to `65/mon`, outside this repo, and have not been applied
-there.
+`rom/mon-fixes/` is the record of what the monitor needed before it would build
+and run on the board. All of it is now in MiniMon's sources (OS16's `rom/`); the
+files stay here as history, and `apps/mandel.asm` includes the `65816.asm` copy.
 
-* **`65816.asm`** -- the include `minimon.asm` expects at
-  `65/os16/include/65816.asm` is missing from disk. This copy was recovered
+* **`65816.asm`** -- the include `minimon.asm` expected at
+  `65/os16/include/65816.asm` was missing from disk. This copy was recovered
   verbatim from the byte columns of the stale `mon/src/minimon.lst`. It defines
   the flag constants, the direct-page register block, and the `native` /
-  `long_a` / `short_a` / `sframe` / `eframe` macros.
+  `long_a` / `short_a` / `sframe` / `eframe` macros. It is now `65816.asm`
+  beside MiniMon's sources.
 * **`mon.patch`** -- three source fixes:
   * `serial.asm`: `ser_putc`'s wait loop branched back to the `pha`, pushing a
     byte on every poll iteration. It only worked against a transmitter that was
@@ -613,9 +618,8 @@ there.
 * **`monitor.patch`** -- the display console, ADB keyboard input and the
   command interpreter (see [Console](#console) and
   [Monitor commands](#monitor-commands)), plus the line buffer's move out of
-  the I/O block. Unlike the description above, this one **is applied** to the
-  mon tree; the patch is the record of what changed, since that tree is not
-  under version control.
+  the I/O block. The patch is the record of what changed, from before the
+  monitor was under version control.
 
 **`math.asm` does not assemble.** Its `print_i` routine uses three addressing
 modes that do not exist on the 65C816: `sty <off>,s` (STY has no stack-relative
@@ -908,8 +912,9 @@ coordinates up to ±4. Multiplication uses a 32 KB table of squares built at
 `$4000` when the program starts: x² and y² come from the table, and
 2xy = 4((x+y)/2)² − x² − y², which is exact modulo 2¹⁶. The zoom stops at one
 fixed-point step (1/8192) per pixel, five zooms in from the whole set, or
-about 44 times. The direct page is moved to `$3F00`, so
-the program uses nothing in the monitor's low memory.
+about 44 times. The direct page is moved to `$3F00` (D = `$003F`, as the
+banked mode reads it), so the program uses nothing in the monitor's low
+memory.
 
 ## Monitor commands
 
@@ -943,7 +948,16 @@ pointed at a register with read side effects such as the SCC's data register.
 accumulator and 16-bit index registers. **Return with `RTL`**, not `RTS`. On
 return the monitor restores its own modes, data bank and direct page, so the
 code may leave those however it likes -- but it must leave the stack as it
-found it. A complete round trip:
+found it.
+
+MiniMon turns on the core's **banked direct page and stack**
+([../docs/BankedDP.md](../docs/BankedDP.md)) at reset, so code entered with
+`go` runs banked: D is a bank and page, and D = `$1230` puts the direct page
+at `$12:3000` and the stack in bank `$12`. The monitor's own direct page (0)
+and stack (page 1) are where they always were. Code may turn the mode off
+(`WDM #$B0`); `go` turns it on again on the way back. It may move its direct
+page and stack to another bank, but must have the stack back in bank 0 for
+the `RTL`. A complete round trip:
 
 ```
 >sm 2000 a9 2a 8d 00 30 6b      lda #$2a / sta $3000 / rtl
