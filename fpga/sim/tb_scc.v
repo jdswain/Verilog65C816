@@ -24,6 +24,7 @@ module tb_scc;
     localparam [1:0] BC = 2'd0, BD = 2'd1, AC = 2'd2, AD = 2'd3;
 
     integer errors = 0;
+    integer n;
     task rd(input [1:0] r, output [7:0] v);
         begin
             @(negedge clk); addr = r; we = 0; cs = 1;
@@ -168,6 +169,32 @@ module tb_scc;
         wr(AD, 8'h77);
         repeat (14*DIV) @(posedge clk);
         rd(AC, v);  check("Rx disabled", v & 8'h01, 8'h00);
+
+        // Channel B's baud-rate generator: a zero count every TC + 2
+        // clocks, the external/status interrupt once WR15 bit 1 and WR1
+        // bit 0 allow it, until WR0 Reset Ext/Status Interrupts.
+        wreg(BC, 12, 8'd10); wreg(BC, 13, 8'd0);
+        wreg(BC, 15, 8'h02);                 // zero count IE
+        wreg(BC, 14, 8'h03);                 // PCLK, enabled
+        repeat (40) @(posedge clk);
+        if (!int_n) begin $display("FAIL: zero count interrupt without WR1 bit 0"); errors = errors + 1; end
+        wreg(BC, 1, 8'h01);                  // external/status interrupts
+        repeat (14) @(posedge clk);
+        if (int_n) begin $display("FAIL: no zero count interrupt"); errors = errors + 1; end
+        rreg(AC, 3, v); check("RR3 B Ext/Status pending", v, 8'h01);
+        rreg(BC, 2, v); check("RR2 B vector, B Ext/Status", v, 8'h32);
+        wr(BC, 8'h10);                       // reset ext/status interrupts
+        if (!int_n) begin $display("FAIL: zero count interrupt not reset"); errors = errors + 1; end
+        @(posedge clk);
+        while (!(dut.brg[0] == 16'd0 && !dut.brg_reload[0])) @(posedge clk);
+        @(posedge clk); n = 1;
+        while (!(dut.brg[0] == 16'd0 && !dut.brg_reload[0])) begin @(posedge clk); n = n + 1; end
+        check("zero count period", n, 8'd12);
+        wreg(BC, 14, 8'h02);                 // stopped
+        wr(BC, 8'h10);
+        repeat (40) @(posedge clk);
+        if (!int_n) begin $display("FAIL: zero count after stopping"); errors = errors + 1; end
+        wreg(BC, 1, 8'h00);
 
         // Hardware reset clears MIE and the enables.
         wreg(AC, 9, 8'hC0);

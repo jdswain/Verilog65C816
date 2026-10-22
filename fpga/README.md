@@ -1192,6 +1192,15 @@ Rockwell Forth and the test ROMs (through `rom/scc.asm`) all use it.
 * **Interrupts.** After its hardware reset the SCC raises no interrupts
   until WR1 and MIE (WR9 bit 3) enable them. The Forth runs with IRQs on and
   relies on this.
+* **The clock.** Each channel's baud-rate generator counts as the real
+  part's does, though it does not set the serial rate: while WR14 bit 0 is
+  set and bit 1 selects PCLK (the 25.2 MHz clock), it counts down from its
+  time constant (WR13:WR12) and reloads it, a zero count every time
+  constant + 2 clocks. With WR15 bit 1 and WR1 bit 0 a zero count latches
+  the channel's external/status interrupt (RR3 bit 3 A, bit 0 B), held until
+  WR0 Reset Ext/Status Interrupts (`$10`). The board has no other timer:
+  OS16 takes channel B's as its 2.5 ms clock tick (OS16's
+  `doc/OS16_Processes.md`).
 
 `sim/tb_scc.v` checks the emulation against MiniMon's initialisation, with
 channel A looped back:

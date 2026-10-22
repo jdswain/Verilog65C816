@@ -30,8 +30,16 @@
 //     or WR0 Reset Tx Int Pending), MIE (WR9 bit 3), RR3, and RR2 read from
 //     channel B with the status in it (WR9 bits 0 and 4).
 //   * channel and hardware resets through WR9.
+//   * the baud-rate generators, for their zero count: while WR14 bit 0 is
+//     set and bit 1 selects PCLK (clk; RTxC has no pin), each counts down
+//     from its time constant (WR13:WR12) and reloads it, a zero count every
+//     time constant + 2 clocks. With WR15 bit 1 and WR1 bit 0 a zero count
+//     latches the channel's external/status interrupt pending (RR3 bit 3
+//     A, bit 0 B; vector codes 101 and 001) until WR0 Reset Ext/Status
+//     Interrupts. They do not set the serial rate, and RR0's zero count
+//     bit reads 0. OS16 uses channel B's as its clock tick.
 //
-// Not emulated: synchronous modes, external/status interrupts, the
+// Not emulated: synchronous modes, the other external/status interrupts, the
 // interrupt-under-service chain (Reset Highest IUS is accepted and does
 // nothing), DMA requests, and the modem lines -- RR0 reports DCD and CTS
 // asserted. Nor is the real part's recovery time between accesses, so this
@@ -73,6 +81,9 @@ module scc_85c30 #(
     reg [7:0] wr14  [0:1];
     reg [7:0] wr15  [0:1];
     reg       tx_ip [0:1];
+    reg       ext_ip [0:1];                // external/status: a zero count
+    reg [15:0] brg  [0:1];                 // baud-rate generator counter
+    reg       brg_reload [0:1];
     // Shared
     reg [7:0] wr2;
     reg [7:0] wr9;
@@ -126,18 +137,22 @@ module scc_85c30 #(
     wire rx_ip_a   = rx_mode_a & rx_avail;
     wire tx_ip_a   = tx_ip[A];
     wire tx_ip_b   = tx_ip[B];
+    wire ext_ip_a  = ext_ip[A];
+    wire ext_ip_b  = ext_ip[B];
 
     // RR3, readable from channel A only:
     //   5 A Rx, 4 A Tx, 3 A Ext/Status, 2 B Rx, 1 B Tx, 0 B Ext/Status
-    wire [7:0] rr3 = {2'b00, rx_ip_a, tx_ip_a, 1'b0, 1'b0, tx_ip_b, 1'b0};
+    wire [7:0] rr3 = {2'b00, rx_ip_a, tx_ip_a, ext_ip_a, 1'b0, tx_ip_b, ext_ip_b};
 
-    assign int_n = ~(wr9[3] & (rx_ip_a | tx_ip_a | tx_ip_b));
+    assign int_n = ~(wr9[3] & (rx_ip_a | tx_ip_a | ext_ip_a | tx_ip_b | ext_ip_b));
 
     // RR2 from channel B: the vector with the highest pending source in it.
     // V3-V1 with status low (WR9 bit 4 = 0), V4-V6 reversed with status high.
-    wire [2:0] vcode = rx_ip_a ? 3'b110 :
-                       tx_ip_a ? 3'b100 :
-                       tx_ip_b ? 3'b000 : 3'b011;
+    wire [2:0] vcode = rx_ip_a  ? 3'b110 :
+                       tx_ip_a  ? 3'b100 :
+                       ext_ip_a ? 3'b101 :
+                       tx_ip_b  ? 3'b000 :
+                       ext_ip_b ? 3'b001 : 3'b011;
     wire [7:0] rr2_b = ~wr9[0] ? wr2 :
                        wr9[4]  ? {wr2[7], vcode[0], vcode[1], vcode[2], wr2[3:0]}
                                : {wr2[7:4], vcode, wr2[0]};
@@ -178,6 +193,7 @@ module scc_85c30 #(
             wr14[c]  <= (wr14[c] & 8'hC3) | 8'h20;
             wr15[c]  <= 8'hF8;
             tx_ip[c] <= 1'b0;
+            ext_ip[c] <= 1'b0;
         end
     endtask
 
@@ -188,6 +204,7 @@ module scc_85c30 #(
                 wr4[i]  <= 8'h04; wr5[i]  <= 8'h00; wr10[i] <= 8'h00;
                 wr11[i] <= 8'h08; wr12[i] <= 8'h00; wr13[i] <= 8'h00;
                 wr14[i] <= 8'h30; wr15[i] <= 8'hF8; tx_ip[i] <= 1'b0;
+                ext_ip[i] <= 1'b0; brg[i] <= 16'd0; brg_reload[i] <= 1'b0;
             end
             wr2      <= 8'h00;
             wr9      <= 8'h00;
@@ -201,6 +218,23 @@ module scc_85c30 #(
             rdata    <= 8'h00;
         end else begin
             tx_load <= 1'b0;
+
+            //----------------------------------------------------------
+            // Baud-rate generators: TC, TC-1, ... 0, a clock to reload.
+            //----------------------------------------------------------
+            for (i = 0; i < 2; i = i + 1) begin
+                if (wr14[i][1:0] != 2'b11) begin
+                    brg[i] <= {wr13[i], wr12[i]};
+                    brg_reload[i] <= 1'b0;
+                end else if (brg_reload[i]) begin
+                    brg[i] <= {wr13[i], wr12[i]};
+                    brg_reload[i] <= 1'b0;
+                end else if (brg[i] == 16'd0) begin
+                    brg_reload[i] <= 1'b1;
+                    if (wr15[i][1] & wr1[i][0]) ext_ip[i] <= 1'b1;
+                end else
+                    brg[i] <= brg[i] - 16'd1;
+            end
 
             //----------------------------------------------------------
             // Transmitter: move the buffer to the shift register.
@@ -269,6 +303,7 @@ module scc_85c30 #(
                     // WR0: pointer and command
                     ptr[ch] <= {wdata[5:3] == 3'b001, wdata[2:0]};
                     case (wdata[5:3])
+                    3'b010: ext_ip[ch] <= 1'b0;  // reset ext/status interrupts
                     3'b101: tx_ip[ch] <= 1'b0;   // reset Tx int pending
                     3'b110: if (ch) overrun <= 1'b0;   // error reset
                     default: ;                   // the rest have no effect here
@@ -314,6 +349,8 @@ module scc_85c30 #(
             // Turning the transmit interrupt off drops anything pending.
             if (~wr1[A][1]) tx_ip[A] <= 1'b0;
             if (~wr1[B][1]) tx_ip[B] <= 1'b0;
+            if (~wr1[A][0]) ext_ip[A] <= 1'b0;
+            if (~wr1[B][0]) ext_ip[B] <= 1'b0;
         end
     end
 endmodule
