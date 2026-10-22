@@ -1,31 +1,50 @@
 //============================================================================
-// external_bus.v -- bridge from the CPU bus to an external peripheral card
+// external_bus.v -- bridge from the CPU bus to the carrier's peripherals
 //
-// First target is a WD1773 floppy card wired much like an Apple II slot, with
-// the option of an Intel-style card (82077AA) or a real Z8530 later. The style
-// is a BUILD-TIME parameter: both use the same two strobe pins, so swapping
-// cards means re-synthesising rather than rewiring.
+// One bus style: Intel RD#/WR# strobes, as every planned device uses (the
+// 82077AA, both halves of the Z85C80, the W5100S). docs/Hardware.md has the
+// reasoning; the 6502 style and its PHI0 clock are gone.
 //
-//   STYLE_6502 (0): ext_phi0 is a free-running clock, ext_rw is high for read.
-//                   The card sees a classic 6502 cycle -- address and R/W set
-//                   up while PHI0 is low, data transferred while it is high.
+// TIMING. The bridge counts in a bus clock T of three system clocks: 119 ns
+// at 25.2 MHz, a bus clock of 8.4 MHz. No clock goes to the cards; T is only
+// the unit. Counting system clocks from the one that starts a cycle:
 //
-//   STYLE_INTEL (1): ext_phi0 becomes RD# and ext_rw becomes WR#, each pulsed
-//                   low for the access with address set up beforehand.
+//    0   address (ext_a), select code and, for a write, data go out
+//    1   select enable falls: the decoder's inputs have settled first
+//    3   RD# or WR# falls (T2): one T of address and select setup
+//    9   the strobe rises (end of T3), and read data is taken from the
+//        bus as it was in the strobe's last clock: a 238 ns strobe
+//   10   the enable rises: 40 ns of hold
+//   11   data stops being driven, and the CPU gets ack
 //
-// Four active-low selects are decoded here rather than externally: that costs
-// one more pin than exposing extra address lines and a 74-series decoder, and
-// removes a part from the board.
+// A cycle takes about 480 ns, against 1-2 us with the old 1 MHz PHI0.
 //
-// PHI0 is fixed at 1 MHz. The CPU is stalled through `ack` for the whole
-// external cycle -- about 1-2 us -- which is what makes slow cards safe.
+// SELECTS. The four select pins are a three-bit code and an active-low
+// enable, for a 74HCT138 on the carrier: eight slots of 16 registers,
+// addr[6:4] the code and addr[3:0] A3-A0, mirrored every 128 bytes across
+// the window. The enable is low only while the code is steady, so the
+// decoder's outputs never glitch. That matters for the /DACK slots: on the
+// 53C80 a glitch on /DACK clears DRQ.
+//
+// SCC RECOVERY. The Z85C30 needs 3.5 PCLK periods (475 ns at 7.3728 MHz)
+// from one access's falling strobe to the next's. Back-to-back cycles here
+// are only just further apart (13 clocks, 516 ns), and a DMA cycle could
+// come sooner. A cycle to slot 2, the SCC, waits until its
+// strobe will fall at least 5T (15 clocks, 595 ns) after the last one to
+// slot 2 fell. No other slot waits.
+//
+// RESET. While RES# is asserted -- the SoC in reset, or the card_reset bit
+// -- RD# and WR# are both held low. Only the SCC takes that as a reset; the
+// others are not selected and ignore it. The SCC has no reset pin, so this
+// is its hardware reset. CPU accesses meanwhile end at once, read $FF and
+// touch nothing: a cycle would end the SCC's reset.
+//
+// The CPU is stalled through `ack` for the whole cycle.
 //============================================================================
 `default_nettype none
 
 module external_bus #(
-    parameter integer CLK_HZ  = 25_200_000,
-    parameter integer PHI0_HZ = 1_000_000,
-    parameter integer STYLE   = 0        // 0 = 6502, 1 = Intel RD#/WR#
+    parameter integer T_CLKS = 3           // system clocks in a bus clock T
 ) (
     input  wire       clk,
     input  wire       rst_n,
@@ -47,17 +66,25 @@ module external_bus #(
     input  wire [7:0]  ext_d_in,
     output reg  [7:0]  ext_d_out,
     output reg         ext_d_oe,         // 1 = we drive the data bus
-    output reg  [3:0]  ext_sel_n,
-    output reg         ext_rw,           // 6502: 1 = read.  Intel: WR#
-    output reg         ext_phi0,         // 6502: clock.     Intel: RD#
+    output reg  [2:0]  ext_sel,          // select code, to the '138
+    output reg         ext_sel_en_n,     // select enable, active low
+    output reg         ext_rd_n,
+    output reg         ext_wr_n,
     output wire        ext_res_n,
     input  wire        ext_irq_n
 );
-    localparam integer HALF = (CLK_HZ / PHI0_HZ) / 2;   // half a PHI0 period
-    localparam integer CW   = 8;
+    localparam integer CW = 5;
+    localparam [CW-1:0] C_EN     = 1;               // enable falls
+    localparam [CW-1:0] C_STROBE = T_CLKS;          // strobe falls
+    localparam [CW-1:0] C_RISE   = 3 * T_CLKS;      // strobe rises
+    localparam [CW-1:0] C_HOLD   = 3 * T_CLKS + 1;  // enable rises
+    localparam [CW-1:0] C_END    = 3 * T_CLKS + 2;  // data released, ack
 
-    localparam STYLE_6502  = 0;
-    localparam STYLE_INTEL = 1;
+    // From one SCC strobe's fall to the next's: 5T. The next cycle's strobe
+    // falls C_STROBE clocks after it starts, so it may start this much
+    // after the last fall.
+    localparam [CW-1:0] SCC_GAP  = 5 * T_CLKS - T_CLKS;
+    localparam [2:0]    SCC_SLOT = 3'd2;
 
     assign ext_res_n = rst_n & ~card_reset;
 
@@ -70,123 +97,80 @@ module external_bus #(
     end
     assign irq = ~irq_sync[1];
 
-    // Within the 2 KB window: addr[5:4] picks the card, addr[3:0] is A3-A0.
-    wire [1:0] card = addr[5:4];
+    wire [2:0] slot = addr[6:4];
 
     //------------------------------------------------------------------
-    // Free-running PHI0 (6502 style only)
-    //------------------------------------------------------------------
-    reg [CW-1:0] phi_cnt;
-    reg          phi;
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            phi_cnt <= {CW{1'b0}};
-            phi     <= 1'b0;
-        end else if (phi_cnt >= HALF[CW-1:0] - 1) begin
-            phi_cnt <= {CW{1'b0}};
-            phi     <= ~phi;
-        end else begin
-            phi_cnt <= phi_cnt + 1'b1;
-        end
-    end
+    localparam [1:0] S_IDLE = 2'd0, S_CYCLE = 2'd1, S_GAP = 2'd2;
 
-    reg phi_d;
-    always @(posedge clk) phi_d <= phi;
-    wire phi_fall = phi_d & ~phi;
-    wire phi_rise = ~phi_d & phi;
-
-    //------------------------------------------------------------------
-    localparam [2:0] S_IDLE = 3'd0, S_SYNC = 3'd1, S_ACTIVE = 3'd2,
-                     S_SAMPLE = 3'd3, S_END = 3'd4, S_GAP = 3'd5;
-
-    reg [2:0]    state;
-    reg [CW-1:0] timer;
+    reg [1:0]    state;
+    reg [CW-1:0] cnt;                    // system clocks into the cycle
+    reg [CW-1:0] scc_wait;               // clocks until slot 2 may start
+    reg          cyc_we;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state     <= S_IDLE;
-            ack       <= 1'b0;
-            ext_a     <= 4'd0;
-            ext_sel_n <= 4'b1111;
-            ext_d_out <= 8'd0;
-            ext_d_oe  <= 1'b0;
-            ext_rw    <= (STYLE == STYLE_6502) ? 1'b1 : 1'b1;   // idle inactive
-            ext_phi0  <= (STYLE == STYLE_6502) ? 1'b0 : 1'b1;
-            rdata     <= 8'hFF;
-            timer     <= {CW{1'b0}};
+            state        <= S_IDLE;
+            cnt          <= {CW{1'b0}};
+            scc_wait     <= {CW{1'b0}};
+            cyc_we       <= 1'b0;
+            ack          <= 1'b0;
+            ext_a        <= 4'd0;
+            ext_sel      <= 3'd0;
+            ext_sel_en_n <= 1'b1;
+            ext_d_out    <= 8'd0;
+            ext_d_oe     <= 1'b0;
+            ext_rd_n     <= 1'b0;       // RES# is asserted: both strobes low
+            ext_wr_n     <= 1'b0;
+            rdata        <= 8'hFF;
         end else begin
             ack <= 1'b0;
-
-            // In 6502 mode the card needs a clock whether or not we are
-            // accessing it, so PHI0 runs continuously.
-            if (STYLE == STYLE_6502) ext_phi0 <= phi;
+            if (scc_wait != {CW{1'b0}}) scc_wait <= scc_wait - 1'b1;
 
             case (state)
             S_IDLE: begin
-                ext_sel_n <= 4'b1111;
-                ext_d_oe  <= 1'b0;
-                if (req) begin
+                ext_sel_en_n <= 1'b1;
+                ext_d_oe     <= 1'b0;
+                ext_rd_n     <= ~card_reset;
+                ext_wr_n     <= ~card_reset;
+                if (req && card_reset) begin
+                    rdata <= 8'hFF;      // the cards are in reset
+                    ack   <= 1'b1;
+                    state <= S_GAP;
+                end else if (req && !(slot == SCC_SLOT && scc_wait != {CW{1'b0}})) begin
                     ext_a     <= addr[3:0];
+                    ext_sel   <= slot;
                     ext_d_out <= wdata;
-                    if (STYLE == STYLE_6502) begin
-                        ext_rw <= ~we;                  // high = read
-                        state  <= S_SYNC;               // align to the clock
-                    end else begin
-                        // Intel: address, select and (for a write) data go out
-                        // first; the strobe follows after a setup delay, which
-                        // is the tAR/tDW the parts ask for.
-                        ext_sel_n[card] <= 1'b0;
-                        ext_d_oe        <= we;
-                        timer <= HALF[CW-1:0];
-                        state <= S_ACTIVE;
-                    end
+                    ext_d_oe  <= we;
+                    cyc_we    <= we;
+                    cnt       <= {CW{1'b0}};
+                    state     <= S_CYCLE;
                 end
             end
 
-            // 6502: start the cycle on a falling edge of PHI0, so address and
-            // R/W are set up during the low phase as a 6502 would present them.
-            S_SYNC: if (phi_fall) begin
-                ext_sel_n[card] <= 1'b0;
-                ext_d_oe        <= we;
-                state           <= S_ACTIVE;
-            end
-
-            S_ACTIVE: begin
-                if (STYLE == STYLE_6502) begin
-                    // Data is valid during the high phase; sample at its end.
-                    if (phi_fall) state <= S_SAMPLE;
-                end else begin
-                    if (timer != {CW{1'b0}}) begin
-                        timer <= timer - 1'b1;
-                    end else begin
-                        // Address and select are set up: assert the strobe.
-                        if (we) ext_rw   <= 1'b0;       // WR#
-                        else    ext_phi0 <= 1'b0;       // RD#
-                        timer <= HALF[CW-1:0];
-                        state <= S_SAMPLE;
-                    end
+            S_CYCLE: begin
+                cnt <= cnt + 1'b1;
+                // cnt is the clock just finished, so each action below lands
+                // on clock cnt + 1 of the cycle.
+                case (cnt + 1'b1)
+                C_EN:     ext_sel_en_n <= 1'b0;
+                C_STROBE: begin
+                    if (cyc_we) ext_wr_n <= 1'b0;
+                    else        ext_rd_n <= 1'b0;
+                    if (ext_sel == SCC_SLOT) scc_wait <= SCC_GAP;
                 end
-            end
-
-            S_SAMPLE: begin
-                if (STYLE == STYLE_6502) begin
-                    rdata <= ext_d_in;
-                    state <= S_END;
-                end else if (timer != {CW{1'b0}}) begin
-                    timer <= timer - 1'b1;
-                end else begin
-                    rdata    <= ext_d_in;               // before the strobe rises
-                    ext_rw   <= 1'b1;
-                    ext_phi0 <= 1'b1;
-                    state    <= S_END;
+                C_RISE: begin
+                    rdata    <= ext_d_in;
+                    ext_rd_n <= 1'b1;
+                    ext_wr_n <= 1'b1;
                 end
-            end
-
-            S_END: begin
-                ext_sel_n <= 4'b1111;
-                ext_d_oe  <= 1'b0;
-                ack       <= 1'b1;
-                state     <= S_GAP;
+                C_HOLD:   ext_sel_en_n <= 1'b1;
+                C_END: begin
+                    ext_d_oe <= 1'b0;
+                    ack      <= 1'b1;
+                    state    <= S_GAP;
+                end
+                default: ;
+                endcase
             end
 
             // One cycle for the CPU to see ack and move on before we look at

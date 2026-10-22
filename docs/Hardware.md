@@ -102,20 +102,21 @@ while the FPGA is unconfigured and its pins float.
 
 ## External bus
 
-**Built** (`rtl/external_bus.v`):
+**Built** (`rtl/external_bus.v`, tested by `sim/tb_extbus.v`):
 * an 8-bit data bus
 * four address lines
-* four card selects decoded inside the FPGA
-* `RD#`/`WR#` or 6502-style strobes, chosen at build time
-* `RES#` to the cards
+* a three-bit select code and an enable, for eight selects
+* Intel `RD#`/`WR#` strobes, on the 8.4 MHz timing below
+* the SCC recovery hold
+* `RES#` to the cards, with `RD#` and `WR#` held low while it is asserted
 * one `IRQ#` input
 
 ### One bus style, at 8 MHz
 
-**Proposed:** the bus is standardised on Intel-style `RD#`/`WR#` strobes
+**Built:** the bus is standardised on Intel-style `RD#`/`WR#` strobes
 with timing based on an 8 MHz bus clock. The 6502 style, with its free-running
 PHI0, is dropped, and with it 6502-family peripherals such as the WD1773.
-`EXT_STYLE` and the PHI0 generator come out of `external_bus.v`, and pin 76
+`EXT_STYLE` and the PHI0 generator are gone from `external_bus.v`, and pin 76
 is permanently `RD#`.
 
 Every planned device is an Intel-bus part: the 82077AA, both halves of the
@@ -136,24 +137,25 @@ don't need one. T is only the unit the bridge counts in.
 | Strobe rises | end of T3 | Strobe width 238 ns |
 | Enable released, then address | 40 ns after the strobe | Hold |
 
-An access takes about 400 ns, against 1-2 us today.
+A cycle takes about 480 ns from the address going out to the data released (it took 1-2 us with the 6502-style bus); the CPU sees about 560 ns.
 
 The timing against the Z85C30's 10 MHz figures:
 * Address setup: 50 ns needed, 119 ns given.
 * `/RD` low width: 125 ns needed, 238 ns given.
-* `/RD` to data valid: 120 ns, sampled at about 200 ns.
-* Address to data valid: 180 ns, sampled at about 320 ns.
+* `/RD` to data valid: 120 ns, sampled at about 230 ns.
+* Address to data valid: 180 ns, sampled at about 350 ns.
 
 The 8 MHz grade will be somewhat slower, and the level shifters add 5-20 ns
 each way. **Check** the 8 MHz figures, and the 82077AA, 53C80 and W5100S
 figures, against this table.
 
-**SCC recovery.** Back-to-back accesses put strobes about 400 ns apart, which
-is less than the SCC's 475 ns. The bridge therefore holds off an SCC access
-until 5T (595 ns) after the previous SCC strobe fell. It applies this only to
-select 2.
+**SCC recovery.** The bridge can start a cycle 13 clocks (516 ns) after the
+last began, and the CPU's back-to-back accesses come about 560 ns apart: both
+just above the SCC's 475 ns, with little margin, and a DMA cycle could come
+sooner. The bridge therefore holds off an SCC access until 5T (595 ns) after
+the previous SCC strobe fell. It applies this only to select 2.
 
-### Select decoding: proposed change
+### Select decoding
 
 Seven selects are needed and the bus has four:
 
@@ -167,7 +169,7 @@ Seven selects are needed and the bus has four:
 | 5 | W5100S `/CS` |
 | 6, 7 | spare |
 
-**Proposed:** the four select pins become a three-bit code plus an active-low
+**Built:** the four select pins are a three-bit code plus an active-low
 enable, driving a 74HCT138. That uses the same four pins and gives eight
 selects.
 
@@ -208,8 +210,9 @@ that saves a part. With seven selects needed the trade goes the other way.
 | Z85C80 SCC | none | `/RD` and `/WR` asserted together |
 | W5100S | `/RESET`, active low | from `RES#` |
 
-**Proposed:** while `RES#` is asserted, the bridge also pulls `RD#` and `WR#`
-low together.
+**Built:** while `RES#` is asserted, the bridge also pulls `RD#` and `WR#`
+low together. CPU accesses to the window meanwhile end at once and read
+`$FF`, since a cycle would end the SCC's reset.
 * Only the SCC treats that as a reset.
 * The other chips are not selected, so they ignore it.
 
@@ -528,8 +531,8 @@ Sources:
 | 28 | `adb_sense` | Built, Board | LCD B6 on the schematic; nothing else on it |
 | 29, 30, 41, 42, 48, 77 | `ext_d[1:5]`, `ext_d[7]` | Built | LCD connector and header only |
 | 15-18 | `ext_a[3:0]` | Built | LED0-LED3, also LCD connector pins 37-40 (touch) |
-| 75 | `ext_rw` (`WR#`) | Built, Sch | BL616 SPI MISO |
-| 76 | `ext_phi0` (`RD#`) | Built, Sch | BL616 SPI MOSI |
+| 75 | `ext_wr_n` (`WR#`) | Built, Sch | BL616 SPI MISO |
+| 76 | `ext_rd_n` (`RD#`) | Built, Sch | BL616 SPI MOSI |
 | 86 | `ext_res_n` | Built, Sch | BL616 SPI DIR |
 | 19 | `ext_irq_n` | Built | LED4 |
 
@@ -547,8 +550,8 @@ well as the UART.
 | 31 | `ext_d[0]` | Sch, Proposed | unused | It moves here from pin 25. |
 | 25 | **unused** | Sch | `ext_d[0]` | It goes to HDMI CEC through 100R, with a 27k pull-up. With a monitor connected, the monitor sits on data bit 0. |
 | 49 | `ext_d[6]` | Sch | unchanged | This is the LCD backlight boost enable. Whenever the bit is high the boost converter runs with no load. **Check:** the converter tolerates an open load, or move this bit too. |
-| 71, 72, 73 | `ext_sel[2:0]`, the select code | Sch, Proposed | `ext_sel_n[2:0]` | Header only. They carry HSPI labels but don't reach the BL616. |
-| 74 | `ext_sel_en_n`, the select enable | Sch, Proposed | `ext_sel_n[3]` | Header only |
+| 71, 72, 73 | `ext_sel[2:0]`, the select code | Sch, Built | `ext_sel_n[2:0]` | Header only. They carry HSPI labels but don't reach the BL616. |
+| 74 | `ext_sel_en_n`, the select enable | Sch, Built | `ext_sel_n[3]` | Header only |
 | 79 | `dma_drq[0]`, SCSI | Sch, Proposed | unused | The WS2812 LED, with a 5.1k pull-down. The pull-down suits an active-high input. The LED may flicker during DMA. |
 | 80 | `dma_drq[1]`, floppy | Sch, Proposed | unused | SD D2, with a 10k pull-up. Free, because the SD card isn't used. |
 | 85 | `dma_tc` | Sch, Proposed | unused | SD D1, with a 10k pull-up. Free for the same reason. |

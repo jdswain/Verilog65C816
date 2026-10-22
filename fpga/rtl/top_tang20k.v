@@ -46,13 +46,14 @@ module top_tang20k #(
     // Level shifting to the bus's 5V is external.
     output wire        adb_drive,
     input  wire        adb_sense,
-    // External peripheral bus (Apple II-ish card slot). ext_d is a real
-    // bidirectional pin group; everything else is unidirectional.
+    // External peripheral bus (external_bus.v, docs/Hardware.md). ext_d is a
+    // real bidirectional pin group; everything else is unidirectional.
     output wire [3:0]  ext_a,
     inout  wire [7:0]  ext_d,
-    output wire [3:0]  ext_sel_n,
-    output wire        ext_rw,
-    output wire        ext_phi0,
+    output wire [2:0]  ext_sel,
+    output wire        ext_sel_en_n,
+    output wire        ext_rd_n,
+    output wire        ext_wr_n,
     output wire        ext_res_n,
     input  wire        ext_irq_n,
     // Sound: I2S to the onboard MAX98357A; amp_en drives its SD_MODE.
@@ -159,8 +160,8 @@ module top_tang20k #(
         .vid_hsync(v_hs), .vid_vsync(v_vs), .vid_de(v_de),
         .adb_drive(adb_drive), .adb_sense(adb_sense),
         .ext_a(ext_a), .ext_d_in(ext_d_in), .ext_d_out(ext_d_out),
-        .ext_d_oe(ext_d_oe), .ext_sel_n(ext_sel_n),
-        .ext_rw(ext_rw), .ext_phi0(ext_phi0),
+        .ext_d_oe(ext_d_oe), .ext_sel(ext_sel), .ext_sel_en_n(ext_sel_en_n),
+        .ext_rd_n(ext_rd_n), .ext_wr_n(ext_wr_n),
         .ext_res_n(ext_res_n), .ext_irq_n(ext_irq_n),
         .i2s_bclk(i2s_bclk), .i2s_lrck(i2s_lrck), .i2s_din(i2s_din),
         .amp_en(amp_en)

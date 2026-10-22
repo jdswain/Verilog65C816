@@ -81,11 +81,7 @@ module soc #(
     parameter         USE_VIDEO = 1,
     parameter integer SYS_HZ    = 25_200_000,   // drives SDRAM refresh timing
     parameter integer ROM_BITS  = 13,       // 8 KB
-    parameter [15:0]  ROM_BASE  = 16'hE000,
-    // External bus: 0 = 6502 (free-running PHI0 + R/W), 1 = Intel (RD#/WR#).
-    // Build-time, because both styles share the same two pins.
-    parameter integer EXT_STYLE   = 0,
-    parameter integer EXT_PHI0_HZ = 1_000_000
+    parameter [15:0]  ROM_BASE  = 16'hE000
 ) (
     input  wire       clk,
     input  wire       rst_n,
@@ -130,9 +126,10 @@ module soc #(
     input  wire [7:0]  ext_d_in,
     output wire [7:0]  ext_d_out,
     output wire        ext_d_oe,
-    output wire [3:0]  ext_sel_n,
-    output wire        ext_rw,
-    output wire        ext_phi0,
+    output wire [2:0]  ext_sel,
+    output wire        ext_sel_en_n,
+    output wire        ext_rd_n,
+    output wire        ext_wr_n,
     output wire        ext_res_n,
     input  wire        ext_irq_n,
     // Sound: I2S to the board's MAX98357A, and its enable (see sound.v)
@@ -504,11 +501,9 @@ module soc #(
     //------------------------------------------------------------------
     // External peripheral bus
     //
-    // The window is $0800-$0FFF. Within it addr[5:4] picks one of the four
-    // active-low card selects and addr[3:0] drives A3-A0, so each card gets 16
-    // registers -- enough for a WD1773 (4) or an 82077AA (8). Decoding the
-    // selects here instead of on the board costs one FPGA pin over exposing
-    // A5-A4 and a '139, and removes a part.
+    // The window is $0800-$0FFF: eight slots of 16 registers, addr[6:4] the
+    // select code for the carrier's '138 and addr[3:0] A3-A0, mirrored every
+    // 128 bytes. Intel RD#/WR# strobes on an 8.4 MHz timing (external_bus.v).
     //
     // $0340 is the bridge's own control register (not on the external bus):
     //   write bit 0 = hold RES asserted to the cards
@@ -531,7 +526,7 @@ module soc #(
     // serial port, and the bridge never sees the access. It answers through
     // the external bus's handshake, so the wait-state logic is unchanged.
     //------------------------------------------------------------------
-    wire       scc_slot = (addr[10:4] == 7'h02);
+    wire       scc_slot = (addr[6:4] == 3'd2);     // slot 2, mirrored as the bridge's
     wire       scc_req  = vld & sel_ext & scc_slot;
     wire [7:0] scc_q;
     wire [7:0] bridge_q;
@@ -559,16 +554,14 @@ module soc #(
     assign ext_ack = bridge_ack | scc_ack;
     assign ext_q   = scc_ack ? scc_q : bridge_q;
 
-    external_bus #(
-        .CLK_HZ(SYS_HZ), .PHI0_HZ(EXT_PHI0_HZ), .STYLE(EXT_STYLE)
-    ) u_ext (
+    external_bus u_ext (
         .clk(clk), .rst_n(rst_n),
         .addr(addr[10:0]), .wdata(wdata), .rdata(bridge_q),
         .req(vld & sel_ext & ~scc_slot), .we(we), .ack(bridge_ack),
         .card_reset(card_reset), .irq(ext_irq),
         .ext_a(ext_a), .ext_d_in(ext_d_in), .ext_d_out(ext_d_out),
-        .ext_d_oe(ext_d_oe), .ext_sel_n(ext_sel_n),
-        .ext_rw(ext_rw), .ext_phi0(ext_phi0),
+        .ext_d_oe(ext_d_oe), .ext_sel(ext_sel), .ext_sel_en_n(ext_sel_en_n),
+        .ext_rd_n(ext_rd_n), .ext_wr_n(ext_wr_n),
         .ext_res_n(ext_res_n), .ext_irq_n(ext_irq_n)
     );
 

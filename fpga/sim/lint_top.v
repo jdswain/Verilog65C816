@@ -16,9 +16,10 @@ module lint_top;
     wire sclk, scke, scs, scas, sras, swen;
     wire tclkp, tclkn; wire [2:0] tdp, tdn;
     wire adb_drive;
-    wire [3:0] ext_a, ext_sel_n;
+    wire [3:0] ext_a;
+    wire [2:0] ext_sel;
     wire [7:0] ext_d;
-    wire ext_rw, ext_phi0, ext_res_n;
+    wire ext_sel_en_n, ext_rd_n, ext_wr_n, ext_res_n;
 
     top_tang20k dut (
         .clk(1'b0), .rst(1'b1), .led(led),
@@ -30,8 +31,8 @@ module lint_top;
         .tmds_clk_p(tclkp), .tmds_clk_n(tclkn),
         .tmds_d_p(tdp), .tmds_d_n(tdn),
         .adb_drive(adb_drive), .adb_sense(1'b1),
-        .ext_a(ext_a), .ext_d(ext_d), .ext_sel_n(ext_sel_n),
-        .ext_rw(ext_rw), .ext_phi0(ext_phi0),
+        .ext_a(ext_a), .ext_d(ext_d), .ext_sel(ext_sel),
+        .ext_sel_en_n(ext_sel_en_n), .ext_rd_n(ext_rd_n), .ext_wr_n(ext_wr_n),
         .ext_res_n(ext_res_n), .ext_irq_n(1'b1)
     );
 endmodule

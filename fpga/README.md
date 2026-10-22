@@ -85,7 +85,7 @@ window for the external bus:
 | `$0400`-`$04FF` | unclaimed, reads `$FF` |
 | `$0500`-`$057F` | sound: two SIDs and a control register (see [Sound](#sound)) |
 | `$0580`-`$07FF` | unclaimed, reads `$FF` |
-| `$0800`-`$0FFF` | external bus window: 4 cards x 16 registers |
+| `$0800`-`$0FFF` | external bus window: 8 slots x 16 registers |
 | &nbsp;&nbsp;`$0820`-`$082F` | emulated Z85C30 SCC, answering instead of card 2 (see [Serial: the SCC](#serial-the-scc)) |
 
 Each device decodes a 64-byte slot, so its registers repeat within that slot.
@@ -308,25 +308,44 @@ about, and sees every byte the blitter writes as soon as the blit is finished
 
 ### External bus
 
-`$0800`-`$0FFF` is a window onto an external card connector, wired much like an
-Apple II slot. Within it `addr[5:4]` picks one of four active-low card selects
-and `addr[3:0]` drives A3-A0, so each card sees 16 registers -- enough for a
-WD1773 (4) or an 82077AA (8):
+`$0800`-`$0FFF` is a window onto the carrier's peripherals (`rtl/external_bus.v`,
+`docs/Hardware.md`). Within it `addr[6:4]` is a three-bit select code and
+`addr[3:0]` drives A3-A0, so there are eight slots of 16 registers, mirrored
+every 128 bytes to the end of the window. The code and an active-low enable go
+to a 74HCT138 on the carrier, which makes the eight selects:
 
-| Card | Registers | Select |
+| Slot | Registers | Device on the carrier |
 |---|---|---|
-| 0 | `$0800`-`$080F` | `IO0#` |
-| 1 | `$0810`-`$081F` | `IO1#` |
-| 2 | `$0820`-`$082F` | `IO2#` |
-| 3 | `$0830`-`$083F` | `IO3#` |
+| 0 | `$0800`-`$080F` | 82077AA floppy controller |
+| 1 | `$0810`-`$081F` | 82077AA `/DACK` |
+| 2 | `$0820`-`$082F` | Z85C80 SCC (emulated in the FPGA for now; the bridge never sees it) |
+| 3 | `$0830`-`$083F` | Z85C80 SCSI (53C80) |
+| 4 | `$0840`-`$084F` | Z85C80 SCSI `/DACK` |
+| 5 | `$0850`-`$085F` | W5100S Ethernet |
+| 6, 7 | `$0860`-`$087F` | spare |
 
-...mirrored every 64 bytes to the end of the window. Decoding the selects in the
-FPGA costs one pin over exposing A5-A4 and a '139, and removes a part from the
-board.
+The enable is low only while the code is steady, so the decoder's outputs
+never glitch; on the 53C80 a glitch on `/DACK` would clear its DMA request.
 
-Every access stalls the CPU for the whole external cycle, 1-2 us. That is
-transparent to code, but it means a tight polling loop on a card register runs
-at roughly 500 kHz, not at CPU speed.
+**Timing.** Intel-style `RD#`/`WR#` strobes, counted in a bus clock of three
+system clocks (119 ns, 8.4 MHz); no clock goes to the cards:
+
+| System clock of the cycle | |
+|---|---|
+| 0 | address, select code and write data out |
+| 1 | select enable low |
+| 3 | `RD#` or `WR#` low (119 ns of setup) |
+| 9 | the strobe rises (238 ns wide); read data is taken as it was just before |
+| 10 | the enable rises (40 ns of hold) |
+| 11 | write data released; the CPU continues |
+
+The CPU stalls for the whole cycle, about 0.5 us, so a polling loop on a card
+register runs at roughly 1 MHz rather than CPU speed.
+
+**SCC recovery.** The Z85C30 needs 3.5 PCLK periods between one access's
+falling strobe and the next's (475 ns at 7.3728 MHz). A cycle to slot 2 waits
+until its strobe will fall at least 595 ns after the previous slot 2 strobe;
+no other slot waits.
 
 #### External bus control -- `$0340`
 
@@ -336,7 +355,10 @@ at roughly 500 kHz, not at CPU speed.
 | 1-7 | ignored | 0 |
 
 `RES#` is also asserted while the SoC itself is in reset, so cards come up
-reset without software help; the bit is for re-resetting a wedged card. It is a
+reset without software help; the bit is for re-resetting a wedged card. While
+`RES#` is asserted `RD#` and `WR#` are both held low, which is the SCC's
+hardware reset (it has no reset pin; the other chips are not selected and
+ignore it), and CPU accesses to the window end at once and read `$FF`. It is a
 **level**, not a pulse -- set it, wait, clear it:
 
 ```
@@ -353,21 +375,6 @@ latched: it follows the card and clears when the card clears it. The card IRQ
 is ORed with the SCC's into the 816's single `IRQ` line, so an ISR must check
 both sources.
 
-#### Bus style
-
-A **build-time** parameter, because both styles share the same two strobe pins:
-
-| `EXT_STYLE` | `ext_rw` | `ext_phi0` | For |
-|---|---|---|---|
-| 0 (default) | R/W, high = read | free-running 1 MHz PHI0 | WD1773 and other 65xx-bus cards |
-| 1 | `WR#` | `RD#` | 82077AA and other Intel-bus parts |
-
-In 6502 style the bridge waits for a falling edge of PHI0 before asserting the
-select, so the card sees address and R/W set up during the low phase and data
-transferred during the high phase, exactly as a 6502 would present them. In
-Intel style address, select and write data go out first and the strobe follows
-half a PHI0 period later, which is the `tAR`/`tDW` setup the parts ask for.
-
 #### Connector pinout
 
 20 pins, scraped together from three places on the board. There was no single
@@ -377,9 +384,9 @@ free bank big enough. The notes are from Sipeed's schematic (revision 3923):
 |---|---|---|
 | `ext_d[7:0]` | 25, 29, 30, 41, 42, 48, 49, 77 | the LCD connector and the edge headers; see below for 25 and 49 |
 | `ext_a[3:0]` | 15, 16, 17, 18 | four of the six LEDs, and the LCD connector's touch pins |
-| `ext_sel_n[3:0]` | 71, 72, 73, 74 | headers only (they carry HSPI labels but don't reach the BL616) |
-| `ext_rw` | 75 | the BL616's SPI link (MISO) |
-| `ext_phi0` | 76 | the BL616's SPI link (MOSI) |
+| `ext_sel[2:0]`, `ext_sel_en_n` | 71, 72, 73; 74 | headers only (they carry HSPI labels but don't reach the BL616) |
+| `ext_wr_n` | 75 | the BL616's SPI link (MISO) |
+| `ext_rd_n` | 76 | the BL616's SPI link (MOSI) |
 | `ext_res_n` | 86 | the BL616's SPI link (DIR) |
 | `ext_irq_n` | 19 | the fifth LED |
 
@@ -406,8 +413,8 @@ The connector is a 3.3V bus and **the FPGA's pins are not 5V tolerant**. 5V
 cards need level shifting; `docs/Hardware.md` specifies it for the target
 board.
 
-`make exttest` builds a ROM that pulses `RES#`, dumps all four cards' 16
-registers and performs a write. With nothing plugged in it prints `FF`
+`make exttest` builds a ROM that pulses `RES#`, dumps the 16 registers of
+every slot but the SCC's and performs a write. With nothing plugged in it prints `FF`
 everywhere and `ctrl=00`; that alone proves the window decodes, the FSM runs a
 full cycle and acks, and the CPU is released again.
 

@@ -42,11 +42,10 @@ so the SDRAM sees one transaction per four or sixteen bytes.
 
 ## Prerequisite: the external bus
 
-The engine needs the bus as `Hardware.md` proposes it, which is not built
-yet:
+**Built** (step 1). The engine needs the bus as `Hardware.md` gives it:
 
 * Intel-style `RD#`/`WR#` only, on the 8.4 MHz timing (about 400 ns a
-  cycle). `EXT_STYLE`, PHI0 and the 6502 cycle go.
+  cycle). `EXT_STYLE`, PHI0 and the 6502 cycle are gone.
 * The four select pins as a three-bit code and an active-low enable
   driving a 74HCT138: eight 16-byte slots at `$0800 + n*16`, mirrored every
   128 bytes. The enable keeps the `/DACK` outputs from glitching; on the
@@ -55,8 +54,8 @@ yet:
 
 The addresses software uses today don't move: the 82077AA at `$0800`, the
 SCC at `$0820` and the 53C80 at `$0830`. This is step 1 of the plan below,
-and it is worth doing on its own, since it is three to five times faster
-for every card access.
+and it was worth doing on its own: every card access is two to four times
+faster.
 
 ## Registers
 
@@ -339,7 +338,7 @@ The driver work, in outline (the drivers are OS16's to design):
 
 Each step can be tested before the next starts.
 
-1. **The external bus** to one style, the 8.4 MHz timing and the eight-slot
+1. **Done.** **The external bus** to one style, the 8.4 MHz timing and the eight-slot
    decode (`external_bus.v`, `top_tang20k.v`, the `.cst`, `fpga/README.md`).
    Test: the SoC simulation and a card bus model in a test bench; on the
    board, the timing on a logic analyser.

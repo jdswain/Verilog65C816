@@ -4,8 +4,8 @@
 * With nothing plugged into the connector every read should return $FF (the    *
 * data pins are pulled up internally) and no access should hang: that alone    *
 * proves the window decodes, the bus FSM runs a full cycle and acks, and the   *
-* CPU is released again. On a scope you should also see PHI0 free-running at   *
-* ~1 MHz and IO0# pulsing low once per read.                                   *
+* CPU is released again. On a scope: each read is the select enable low for   *
+* about 360 ns with the slot's code on ext_sel, and RD# low for 238 ns in it.  *
 *                                                                              *
 * With a card attached the register dump becomes the card's own registers.     *
 ********************************************************************************
@@ -18,7 +18,7 @@
 	include "scc.asm"
 
 	ext_ctrl   = $0340	;w: bit0 = hold RES.  r: bit0 = card IRQ
-	ext_win    = $0800	;+$00 card0, +$10 card1, +$20 card2, +$30 card3
+	ext_win    = $0800	;eight slots of 16, slot n at +n*16; slot 2 is the SCC
 
 start	native
 	short_a
@@ -42,8 +42,8 @@ resdly	dex
 	ldx #str_crlf
 	jsr puts
 
-	;; ---- dump 16 registers from each of the four cards ----
-	ldy #0			;card number
+	;; ---- dump 16 registers from each slot but the SCC's ----
+	ldy #0			;slot number
 cardloop ldx #str_card
 	jsr puts
 	tya
@@ -53,6 +53,8 @@ cardloop ldx #str_card
 	lda #$20
 	jsr putc
 
+	cpy #2			;the emulated SCC answers slot 2: leave it alone
+	beq nextcard
 	phy
 	tya
 	asl a
@@ -70,10 +72,10 @@ regloop	lda.w ext_win,x
 	bne regloop
 	ply
 
-	ldx #str_crlf
+nextcard ldx #str_crlf
 	jsr puts
 	iny
-	cpy #4
+	cpy #8
 	bne cardloop
 
 	;; ---- a write, to prove the write path completes too ----
@@ -122,8 +124,8 @@ phn_out	jmp putc
 
 str_hello text.0 "external bus test",$0d,$0a
 str_ctrl  text.0 "ctrl="
-str_card  text.0 "card "
-str_wr    text.0 "write $5A to card0 reg3, reads back "
+str_card  text.0 "slot "
+str_wr    text.0 "write $5A to slot 0 reg 3, reads back "
 str_done  text.0 "done",$0d,$0a
 str_crlf  text.0 $0d,$0a
 

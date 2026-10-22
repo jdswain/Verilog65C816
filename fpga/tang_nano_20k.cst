@@ -61,23 +61,25 @@ IO_PORT "ext_a[1]" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
 IO_PORT "ext_a[2]" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
 IO_PORT "ext_a[3]" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
 
-IO_LOC  "ext_sel_n[0]" 71;
-IO_LOC  "ext_sel_n[1]" 72;
-IO_LOC  "ext_sel_n[2]" 73;
-IO_LOC  "ext_sel_n[3]" 74;
-IO_PORT "ext_sel_n[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
-IO_PORT "ext_sel_n[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
-IO_PORT "ext_sel_n[2]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
-IO_PORT "ext_sel_n[3]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+// The select code and its active-low enable, to the carrier's 74HCT138. The
+// enable is pulled up so the decoder stays off while the FPGA is unconfigured
+// (the carrier has its own pull-ups on the 5V side as well).
+IO_LOC  "ext_sel[0]"   71;
+IO_LOC  "ext_sel[1]"   72;
+IO_LOC  "ext_sel[2]"   73;
+IO_LOC  "ext_sel_en_n" 74;
+IO_PORT "ext_sel[0]"   IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_PORT "ext_sel[1]"   IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_PORT "ext_sel[2]"   IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_PORT "ext_sel_en_n" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
 
-// STYLE=0: ext_rw is R/W (high = read), ext_phi0 is a free-running 1 MHz clock.
-// STYLE=1: ext_rw is WR#, ext_phi0 is RD#.
-IO_LOC  "ext_rw"    75;
-IO_LOC  "ext_phi0"  76;
+// Intel strobes. Both are held low while RES# is asserted (the SCC's reset).
+IO_LOC  "ext_wr_n"  75;
+IO_LOC  "ext_rd_n"  76;
 IO_LOC  "ext_res_n" 86;
 IO_LOC  "ext_irq_n" 19;
-IO_PORT "ext_rw"    IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
-IO_PORT "ext_phi0"  IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
+IO_PORT "ext_wr_n"  IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
+IO_PORT "ext_rd_n"  IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
 IO_PORT "ext_res_n" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
 IO_PORT "ext_irq_n" IO_TYPE=LVCMOS33 PULL_MODE=UP;
 
