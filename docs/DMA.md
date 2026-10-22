@@ -1,6 +1,8 @@
 # DMA for SCSI and the floppy
 
-**Proposed.** A two-channel DMA engine in the FPGA that moves bytes between
+**Built in the FPGA** (`rtl/dma.v`, `rtl/mm_mux.v`, tested by `sim/tb_dma.v`
+and `rom/dmatest.asm`); em16 and OS16 are still to do. A two-channel DMA
+engine in the FPGA that moves bytes between
 SDRAM and the carrier's 53C80 (SCSI) and 82077AA (floppy), with a model of
 it in em16 and DMA modes in em16's two chips, so that OS16's drivers can use
 it before the carrier exists. `Hardware.md` (DMA) has the pins and the
@@ -79,7 +81,7 @@ Channel 0 is at `$0400`, channel 1 at `$0410`.
 
 | Bit | Name | |
 |---|---|---|
-| 0 | EN | 0 to 1 starts the channel and clears DONE; 1 to 0 stops it |
+| 0 | EN | 1 starts the channel and clears DONE, if it is not BUSY (if it is running it keeps running); 0 stops it |
 | 1 | DIR | 0: device to memory (a read from the disk). 1: memory to device |
 | 2 | TC | assert `TC` during the last byte's cycle |
 | 3 | IE | interrupt while DONE is set |
@@ -94,6 +96,9 @@ Channel 0 is at `$0400`, channel 1 at `$0410`.
 | 0 | DONE | the count reached 0 and every byte is in memory (or out on the bus) |
 
 **The rules:**
+* Every CTRL write sets IE. DIR and TC are taken when the channel starts.
+  A start while the channel is still BUSY (stopped but not yet finished
+  writing) is ignored: wait for BUSY to clear.
 * ADDR and COUNT can only be written while the channel is stopped; writes
   while BUSY are ignored. They are plain bytes, so a 16-bit `sta` writes
   two of them.
@@ -159,7 +164,7 @@ address:
 | select code | `addr[6:4]` | 4 (channel 0) or 1 (channel 1) |
 | `ext_a[3:0]` | `addr[3:0]` | 0 (the chips ignore it during `/DACK`) |
 | strobe | `RD#` read, `WR#` write | `RD#` device to memory, `WR#` memory to device |
-| `TC` | low | high from T1 to the strobe's rise, on the last byte when CTRL.TC |
+| `TC` | low | high from T1 until the enable rises (40 ns after the strobe), on the last byte when CTRL.TC |
 | timing | T1-T3 as in `Hardware.md` | the same |
 
 The bridge takes a DMA request before a CPU one when both are waiting at
@@ -167,10 +172,13 @@ the start of a cycle, so a CPU access to the cards waits at most one DMA
 cycle. The emulated SCC never goes through the bridge and never waits.
 
 **Sampling DRQ again.** Both chips drop DRQ during the `/DACK` cycle if
-they have no further byte. The synchroniser adds two clocks, so the engine
-ignores a channel's DRQ until three clocks after its strobe rose. **Check**
-the 82077AA's and 53C80's DRQ-from-strobe times against this; if either is
-slower, add a clock.
+they have no further byte. The engine ignores a channel's DRQ for
+`DRQ_HOLD` (2) clocks after the bridge ends its cycle, which with the
+two-clock synchroniser means DRQ must have fallen within 4 clocks (159 ns)
+of the strobe rising. `tb_dma` models an 82077AA that drops it 119 ns
+late; with a hold of 0 or 1 the engine reads its empty FIFO. **Check** the
+82077AA's and 53C80's DRQ-from-strobe times against this; if either is
+slower, raise `DRQ_HOLD`.
 
 ### The memory side
 
@@ -202,8 +210,9 @@ store in flight: the CPU carries on before its store reaches SDRAM, and
 port 2 outranks the CPU's port. A driver that fills a buffer and then
 starts a channel could have the engine read a word whose store is still
 waiting. So the cache exposes `wr_busy` (a store accepted but not yet
-retired), and the engine doesn't issue a read while it is high. **Check**
-whether the blitter has the same exposure; the same signal fixes it.
+retired), and the engine doesn't issue a read while it is high (`tb_dma`
+checks it). **Open:** the blitter has the same exposure and doesn't use
+the signal yet.
 
 **The cache.** The engine's writes go past the cache, which snoops port 2
 already: `inv_valid`/`inv_addr` come from the multiplexed port instead of
@@ -218,21 +227,25 @@ master is granted when the port is idle and holds the grant until its
 `done`. If both are asking, the engine wins: it has deadlines and the
 blitter doesn't, and it asks at most once every four bus cycles. Read data
 and `rvalid` go to the granted master; `done & we` with the granted
-address go to the cache's invalidation input. The rule that a master drops
-`req` for a cycle after `done` gives the blitter its turn too.
+address go to the cache's invalidation input. Each master drops `req` for
+a cycle after its `done`, but with two of them one could ask in the cycle
+the other drops, so `mm_mux` also holds port 2's request low for the
+cycle after every `done`: the CPU still gets its turn between any two
+transactions.
 
 ### Throughput and cost
 
-* **Rate:** a cycle is about 400 ns plus the three clocks before DRQ is
-  sampled again: about 1.9 MB/s. The 53C80 can do 3 MB/s and the floppy needs
-  at most 125 KB/s (2.88M), so neither chip is ever kept waiting long.
+* **Rate:** a byte takes the bus cycle (12 clocks), the bridge's gap, the
+  hold-off and the synchroniser: about 17 clocks, 1.5 MB/s at best.
+  `tb_dma` measures 1.26 MB/s against a 53C80 model that raises DRQ again 5
+  clocks after each strobe. The floppy needs at most 125 KB/s (2.88M), so
+  it is never kept waiting long.
 * **SDRAM:** at the full SCSI rate, one word write every 2 µs, a few percent
   of the controller's time.
-* **Logic:** the registers (2 x 52 bits), the write buffers and queues
-  (2 x 72), the line buffers (2 x 128), counters and state: about 600
-  flip-flops and 800-1000 LUTs, estimated. The design uses 72% of the logic
-  today, so it fits, but it is the largest addition left. The line buffers
-  are the first thing to shrink.
+* **Logic:** measured in the Gowin build, the engine and `mm_mux` add about
+  760 flip-flops and 1,340 logic cells: the SoC went from 72% to 78% of the
+  logic, still at 33.5 MHz against 25.2. The line buffers (2 x 128 bits) are
+  the first thing to shrink if room runs short.
 
 ## Signals, pins and the carrier
 
@@ -338,11 +351,11 @@ The driver work, in outline (the drivers are OS16's to design):
 
 Each step can be tested before the next starts.
 
-1. **Done.** **The external bus** to one style, the 8.4 MHz timing and the eight-slot
+1. **Done.** The external bus to one style, the 8.4 MHz timing and the eight-slot
    decode (`external_bus.v`, `top_tang20k.v`, the `.cst`, `fpga/README.md`).
    Test: the SoC simulation and a card bus model in a test bench; on the
    board, the timing on a logic analyser.
-2. **The engine:** `dma.v`, `mm_mux`, the bridge's DMA port, `wr_busy`
+2. **Done.** The engine: `dma.v`, `mm_mux`, the bridge's DMA port, `wr_busy`
    from the cache, the IRQ, and the new pins (`DRQ0`, `DRQ1`, `TC`).
    `sim/tb_dma.v`: the engine with the bridge, a memory model and
    models of both chips (an 82077AA-like FIFO with a byte time, a
@@ -350,7 +363,9 @@ Each step can be tested before the next starts.
    the last byte and only with `/DACK`, unaligned starts and ends, a stop
    with COUNT read back, CPU card accesses between DMA cycles, the store
    ordering, and turn-taking with both channels running. Then the SoC
-   simulation, a timing build, and the bare-board test through `DRQ1`.
+   simulation, a timing build, and the bare-board test through `DRQ1`
+   (`make dmatest`; it passes in the SoC simulation with `+drq1`, and has
+   still to be run on the board).
 3. **em16:** the decode, `EmDMA`, and the two chips' DMA modes, with
    `test/dma.s`.
 4. **OS16:** Floppy, then SCSIManager, then a test that sectors move with

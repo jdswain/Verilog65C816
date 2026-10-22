@@ -39,6 +39,15 @@
 // is its hardware reset. CPU accesses meanwhile end at once, read $FF and
 // touch nothing: a cycle would end the SCC's reset.
 //
+// DMA. dma.v asks for cycles on a second port: a cycle to a /DACK slot,
+// with no address (ext_a is 0; the chips ignore it during /DACK), RD# to
+// read from the device and WR# to write to it, and TC high from the start
+// of the cycle until the enable rises, 40 ns after the strobe, when it is
+// the transfer's last byte: the chips see TC with /DACK across the strobe's
+// rising edge.
+// When both are waiting the DMA cycle goes first, so the CPU waits at most
+// one. The DMA port's data comes back in `rdata` too, flagged by `dma_ack`.
+//
 // The CPU is stalled through `ack` for the whole cycle.
 //============================================================================
 `default_nettype none
@@ -57,6 +66,14 @@ module external_bus #(
     input  wire        we,
     output reg         ack,              // one cycle when the access completes
 
+    // DMA side (dma.v)
+    input  wire        dma_req,          // held for the cycle
+    input  wire        dma_we,           // 1 = WR#, memory to device
+    input  wire [2:0]  dma_slot,         // the /DACK slot
+    input  wire        dma_tc,           // assert TC during this cycle
+    input  wire [7:0]  dma_wdata,
+    output reg         dma_ack,          // one cycle; rdata holds a read
+
     // control register side
     input  wire        card_reset,       // assert RES to the cards
     output wire        irq,              // card IRQ, active high to the CPU
@@ -70,6 +87,7 @@ module external_bus #(
     output reg         ext_sel_en_n,     // select enable, active low
     output reg         ext_rd_n,
     output reg         ext_wr_n,
+    output reg         ext_tc,           // terminal count, active high
     output wire        ext_res_n,
     input  wire        ext_irq_n
 );
@@ -106,6 +124,7 @@ module external_bus #(
     reg [CW-1:0] cnt;                    // system clocks into the cycle
     reg [CW-1:0] scc_wait;               // clocks until slot 2 may start
     reg          cyc_we;
+    reg          cyc_dma;                // this cycle is the DMA port's
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -113,7 +132,10 @@ module external_bus #(
             cnt          <= {CW{1'b0}};
             scc_wait     <= {CW{1'b0}};
             cyc_we       <= 1'b0;
+            cyc_dma      <= 1'b0;
             ack          <= 1'b0;
+            dma_ack      <= 1'b0;
+            ext_tc       <= 1'b0;
             ext_a        <= 4'd0;
             ext_sel      <= 3'd0;
             ext_sel_en_n <= 1'b1;
@@ -123,7 +145,8 @@ module external_bus #(
             ext_wr_n     <= 1'b0;
             rdata        <= 8'hFF;
         end else begin
-            ack <= 1'b0;
+            ack     <= 1'b0;
+            dma_ack <= 1'b0;
             if (scc_wait != {CW{1'b0}}) scc_wait <= scc_wait - 1'b1;
 
             case (state)
@@ -132,16 +155,28 @@ module external_bus #(
                 ext_d_oe     <= 1'b0;
                 ext_rd_n     <= ~card_reset;
                 ext_wr_n     <= ~card_reset;
-                if (req && card_reset) begin
-                    rdata <= 8'hFF;      // the cards are in reset
-                    ack   <= 1'b1;
-                    state <= S_GAP;
+                if ((req || dma_req) && card_reset) begin
+                    rdata   <= 8'hFF;    // the cards are in reset
+                    ack     <= req;
+                    dma_ack <= dma_req;
+                    state   <= S_GAP;
+                end else if (dma_req) begin
+                    ext_a     <= 4'd0;
+                    ext_sel   <= dma_slot;
+                    ext_d_out <= dma_wdata;
+                    ext_d_oe  <= dma_we;
+                    ext_tc    <= dma_tc;
+                    cyc_we    <= dma_we;
+                    cyc_dma   <= 1'b1;
+                    cnt       <= {CW{1'b0}};
+                    state     <= S_CYCLE;
                 end else if (req && !(slot == SCC_SLOT && scc_wait != {CW{1'b0}})) begin
                     ext_a     <= addr[3:0];
                     ext_sel   <= slot;
                     ext_d_out <= wdata;
                     ext_d_oe  <= we;
                     cyc_we    <= we;
+                    cyc_dma   <= 1'b0;
                     cnt       <= {CW{1'b0}};
                     state     <= S_CYCLE;
                 end
@@ -163,10 +198,14 @@ module external_bus #(
                     ext_rd_n <= 1'b1;
                     ext_wr_n <= 1'b1;
                 end
-                C_HOLD:   ext_sel_en_n <= 1'b1;
+                C_HOLD: begin
+                    ext_sel_en_n <= 1'b1;
+                    ext_tc       <= 1'b0;   // held past the strobe, with /DACK
+                end
                 C_END: begin
                     ext_d_oe <= 1'b0;
-                    ack      <= 1'b1;
+                    ack      <= ~cyc_dma;
+                    dma_ack  <= cyc_dma;
                     state    <= S_GAP;
                 end
                 default: ;

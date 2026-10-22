@@ -38,10 +38,12 @@ module tb_extbus;
         .clk(clk), .rst_n(rst_n),
         .addr(addr), .wdata(wdata), .rdata(rdata),
         .req(req), .we(we), .ack(ack),
+        .dma_req(1'b0), .dma_we(1'b0), .dma_slot(3'd0), .dma_tc(1'b0),
+        .dma_wdata(8'd0), .dma_ack(),
         .card_reset(card_reset), .irq(irq),
         .ext_a(ext_a), .ext_d_in(d_in), .ext_d_out(d_out), .ext_d_oe(d_oe),
         .ext_sel(sel), .ext_sel_en_n(sel_en_n),
-        .ext_rd_n(rd_n), .ext_wr_n(wr_n),
+        .ext_rd_n(rd_n), .ext_wr_n(wr_n), .ext_tc(),
         .ext_res_n(res_n), .ext_irq_n(1'b1)
     );
 

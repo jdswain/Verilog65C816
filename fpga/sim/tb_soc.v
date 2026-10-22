@@ -59,6 +59,11 @@ module tb_soc #(
     wire adb_drive, kbd_drive;
     wire adb_bus = ~(adb_drive | kbd_drive);
 
+    // DRQ1 as the bare board has it with +drq1 (pin 80's pull-up): channel 1
+    // always sees a request. Otherwise neither channel does.
+    reg drq1 = 1'b0;
+    initial if ($test$plusargs("drq1")) drq1 = 1'b1;
+
     soc #(.ROM_HEX(ROM_HEX), .DIVISOR(DIVISOR),
           .MAP(MAP), .ROM_BITS(ROM_BITS), .ROM_BASE(ROM_BASE)) dut (
         .clk(clk), .rst_n(rst_n), .rxd(rxd), .txd(txd), .led(led),
@@ -72,7 +77,7 @@ module tb_soc #(
         // so the CPU's rdy -- is x from the first cycle: the SoC never boots.
         .clk_pix(clk_pix), .pix_rst_n(rst_n),
         // No card attached: IRQ must be tied high or it floats into the CPU.
-        .ext_d_in(8'hFF), .ext_irq_n(1'b1),
+        .ext_d_in(8'hFF), .ext_irq_n(1'b1), .dma_drq({drq1, 1'b0}),
         .adb_drive(adb_drive), .adb_sense(adb_bus)
     );
 

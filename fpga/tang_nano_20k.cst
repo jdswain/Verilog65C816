@@ -83,6 +83,18 @@ IO_PORT "ext_rd_n"  IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
 IO_PORT "ext_res_n" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
 IO_PORT "ext_irq_n" IO_TYPE=LVCMOS33 PULL_MODE=UP;
 
+// DMA (docs/DMA.md). The requests are active high. Pin 79 is the WS2812
+// LED's data line with a 5.1k pull-down, so DRQ0 reads low with nothing
+// attached; pin 80 is the SD slot's D2 with a 10k pull-up, so on the bare
+// board DRQ1 always asks, which runs channel 1 at bus speed (a test of the
+// memory side). Pin 85, TC, is the SD slot's D1, with a 10k pull-up.
+IO_LOC  "dma_drq[0]" 79;
+IO_LOC  "dma_drq[1]" 80;
+IO_LOC  "dma_tc"     85;
+IO_PORT "dma_drq[0]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_PORT "dma_drq[1]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_PORT "dma_tc"     IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
+
 // Serial to the onboard BL616 USB bridge
 IO_LOC  "uart_tx" 69;
 IO_PORT "uart_tx" IO_TYPE=LVCMOS33 DRIVE=8;

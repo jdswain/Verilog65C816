@@ -30,7 +30,7 @@ Each item is marked:
 | Two serial ports (one internal, one external) | Z85C80 SCC half | Carrier | Proposed |
 | SCSI (one internal, one external connector) | Z85C80 SCSI half (53C80) | Carrier | Proposed |
 | Floppy (one internal port, two drives) | 82077AA | Carrier | Proposed |
-| DMA, two channels | | FPGA | Proposed |
+| DMA, two channels | | FPGA | Built; untested on the board |
 | Interrupt status and mask | | FPGA | Proposed |
 | Sound, two SIDs | reDIP SID emulation | FPGA, onboard I2S amplifier; stereo DAC optional on the carrier | Built |
 | Ethernet | W5100S | Carrier, on the external bus | Open: proposed below |
@@ -220,8 +220,8 @@ Software can also reset the SCC by writing `$C0` to WR9.
 
 ## DMA
 
-**Proposed.** There are two channels: channel 0 for SCSI and channel 1 for the
-floppy. The engine is in the FPGA, reads and writes SDRAM through the
+**Built** in the FPGA (`rtl/dma.v`); the carrier's side is proposed. There
+are two channels: channel 0 for SCSI and channel 1 for the floppy. The engine is in the FPGA, reads and writes SDRAM through the
 memory-master port, and uses the external bus to reach the device. The
 engine's design, its registers and the plan are in [DMA.md](DMA.md); this
 section is the carrier's side.
@@ -249,9 +249,10 @@ bit. The 82077AA needs `TC`.
 
 ### Bus cycles
 
-One byte takes:
-* one external bus cycle, with `/DACK` and `RD#` or `WR#` and no address, then
-* one byte write or read on the memory-master port.
+One byte takes one external bus cycle, with `/DACK` and `RD#` or `WR#` and
+no address. The engine gathers bytes into words and reads memory sixteen
+bytes at a time, so the memory-master port sees one transaction per four or
+sixteen bytes ([DMA.md](DMA.md#the-memory-side)).
 
 The CPU waits if it accesses the external bus while a DMA cycle is in
 progress. It keeps running from the cache and SDRAM.
@@ -260,18 +261,8 @@ progress. It keeps running from the cache and SDRAM.
 
 * **Floppy:** a 1.44 MB disk delivers 62.5 KB/s, or one byte every 16 us.
   That is no load at all.
-* **SCSI:** with 400 ns bus cycles, about 2 MB/s. The 53C80 itself can do
-  3 MB/s.
-
-### The memory-master port
-
-Port 2 of the SDRAM controller has one master today, the blitter. DMA would
-share it through a multiplexer in `soc.v`, as the code comments already
-anticipate.
-
-Each byte is a single transaction with a byte write mask. That is wasteful
-compared with the blitter's 32-bit words, but it is far below the port's
-bandwidth.
+* **SCSI:** about 1.5 MB/s at best, limited by the bus cycle and the engine's
+  wait before it looks at `DRQ` again. The 53C80 itself can do 3 MB/s.
 
 ### Registers
 
@@ -552,9 +543,9 @@ well as the UART.
 | 49 | `ext_d[6]` | Sch | unchanged | This is the LCD backlight boost enable. Whenever the bit is high the boost converter runs with no load. **Check:** the converter tolerates an open load, or move this bit too. |
 | 71, 72, 73 | `ext_sel[2:0]`, the select code | Sch, Built | `ext_sel_n[2:0]` | Header only. They carry HSPI labels but don't reach the BL616. |
 | 74 | `ext_sel_en_n`, the select enable | Sch, Built | `ext_sel_n[3]` | Header only |
-| 79 | `dma_drq[0]`, SCSI | Sch, Proposed | unused | The WS2812 LED, with a 5.1k pull-down. The pull-down suits an active-high input. The LED may flicker during DMA. |
-| 80 | `dma_drq[1]`, floppy | Sch, Proposed | unused | SD D2, with a 10k pull-up. Free, because the SD card isn't used. |
-| 85 | `dma_tc` | Sch, Proposed | unused | SD D1, with a 10k pull-up. Free for the same reason. |
+| 79 | `dma_drq[0]`, SCSI | Sch, Built | unused | The WS2812 LED, with a 5.1k pull-down. The pull-down suits an active-high input. The LED may flicker during DMA. |
+| 80 | `dma_drq[1]`, floppy | Sch, Built | unused | SD D2, with a 10k pull-up. Free, because the SD card isn't used. |
+| 85 | `dma_tc` | Sch, Built | unused | SD D1, with a 10k pull-up. Free for the same reason. |
 | 51, 54, 55, 56 | sound | Sch, Proposed | unused | The onboard I2S amplifier. See [Sound](#sound). |
 
 ### Spare or not usable
@@ -708,10 +699,10 @@ to the section that explains it.
    the carrier exists, the external SCSI connector, power, SCC DMA, and
    whether to build the Ethernet as proposed.
 4. RTL changes:
-   * Intel-only `external_bus.v` at the 8 MHz timing, with the SCC recovery
-     hold-off
-   * select code and enable
-   * the SCC reset on `RES#`
-   * the DMA engine and its multiplexer on the memory-master port
+   * ~~Intel-only `external_bus.v` at the 8 MHz timing, with the SCC
+     recovery hold-off~~ (done)
+   * ~~select code and enable~~ (done)
+   * ~~the SCC reset on `RES#`~~ (done)
+   * ~~the DMA engine and its multiplexer on the memory-master port~~ (done)
    * the interrupt register
    * the `.cst` pin moves

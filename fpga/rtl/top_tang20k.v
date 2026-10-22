@@ -56,6 +56,9 @@ module top_tang20k #(
     output wire        ext_wr_n,
     output wire        ext_res_n,
     input  wire        ext_irq_n,
+    // DMA: the 53C80's and the 82077AA's requests, and terminal count
+    input  wire [1:0]  dma_drq,
+    output wire        dma_tc,
     // Sound: I2S to the onboard MAX98357A; amp_en drives its SD_MODE.
     output wire        i2s_bclk,
     output wire        i2s_lrck,
@@ -163,6 +166,7 @@ module top_tang20k #(
         .ext_d_oe(ext_d_oe), .ext_sel(ext_sel), .ext_sel_en_n(ext_sel_en_n),
         .ext_rd_n(ext_rd_n), .ext_wr_n(ext_wr_n),
         .ext_res_n(ext_res_n), .ext_irq_n(ext_irq_n),
+        .dma_drq(dma_drq), .dma_tc(dma_tc),
         .i2s_bclk(i2s_bclk), .i2s_lrck(i2s_lrck), .i2s_din(i2s_din),
         .amp_en(amp_en)
     );

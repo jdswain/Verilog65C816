@@ -82,7 +82,8 @@ window for the external bus:
 | `$0340`-`$037F` | external bus control |
 | `$0380`-`$03BF` | video control (graphics/text mode) |
 | `$03C0`-`$03FF` | blitter |
-| `$0400`-`$04FF` | unclaimed, reads `$FF` |
+| `$0400`-`$043F` | DMA engine: two channels for the carrier's SCSI and floppy (see [DMA](#dma----0400)) |
+| `$0440`-`$04FF` | unclaimed, reads `$FF` |
 | `$0500`-`$057F` | sound: two SIDs and a control register (see [Sound](#sound)) |
 | `$0580`-`$07FF` | unclaimed, reads `$FF` |
 | `$0800`-`$0FFF` | external bus window: 8 slots x 16 registers |
@@ -306,6 +307,31 @@ The CPU keeps running during a blit, sharing memory with it turn and turn
 about, and sees every byte the blitter writes as soon as the blit is finished
 -- see [Blitter and the memory-master port](#blitter-and-the-memory-master-port).
 
+### DMA -- `$0400`
+
+Two channels between SDRAM and the carrier's chips, one byte per external
+bus cycle: channel 0 for the 53C80 (SCSI, `DRQ0`, `/DACK` slot 4), channel 1
+for the 82077AA (floppy, `DRQ1`, slot 1). `rtl/dma.v`; `docs/DMA.md` is the
+specification.
+
+| Offset | Channel 0 | Channel 1 | |
+|---|---|---|---|
+| +0..+2 | `$0400` | `$0410` | ADDR, the next byte's address (low first) |
+| +4..+6 | `$0404` | `$0414` | COUNT, the bytes left |
+| +8 | `$0408` | `$0418` | CTRL: 0 EN, 1 DIR (1 = memory to device), 2 TC on the last byte, 3 IE |
+| +9 | `$0409` | `$0419` | STATUS: 7 BUSY, 6 DRQ, 0 DONE (write 1 to clear) |
+
+Load ADDR and COUNT, then write CTRL with EN set. DONE comes when COUNT is
+0 and every byte is in memory; with IE it raises the CPU's IRQ, ORed with
+the SCC and the cards. Writing EN = 0 stops a channel early; once BUSY
+clears, ADDR and COUNT say where it stopped. ADDR and COUNT can't be written
+while BUSY. The engine's writes go past the cache, which drops any line
+they change, and it waits for the cache's posted store before reading.
+
+`make dmatest` builds a ROM that checks the memory side on the bare board:
+without the carrier pin 80 is pulled high, so channel 1 always sees a
+request and reads `$FF` from the pulled-up bus. It prints `dma: ok`.
+
 ### External bus
 
 `$0800`-`$0FFF` is a window onto the carrier's peripherals (`rtl/external_bus.v`,
@@ -389,6 +415,8 @@ free bank big enough. The notes are from Sipeed's schematic (revision 3923):
 | `ext_rd_n` | 76 | the BL616's SPI link (MOSI) |
 | `ext_res_n` | 86 | the BL616's SPI link (DIR) |
 | `ext_irq_n` | 19 | the fifth LED |
+| `dma_drq[1:0]` | 80, 79 | the SD slot's D2 (10k pull-up); the WS2812 LED's data line (5.1k pull-down) |
+| `dma_tc` | 85 | the SD slot's D1 (10k pull-up) |
 
 Things to watch:
 
@@ -1226,8 +1254,11 @@ vvp scc_sim
 
 The SDRAM controller has a third port for anything that reads and writes
 memory by itself. Priority is fixed: display (port 0), then the memory-master
-port (port 2), then the CPU's cache (port 1). The blitter is the only master on
-it so far; DMA would share it through a multiplexer in `soc.v`.
+port (port 2), then the CPU's cache (port 1). Two masters share it, the
+blitter and the DMA engine, through `rtl/mm_mux.v`: a master keeps the port
+until its `done`, the DMA engine wins when both ask, and the port's request
+is held low for the cycle after every `done` so the CPU still gets its turn
+between any two transactions.
 
 A master on this port must do two things, and gets one for free:
 

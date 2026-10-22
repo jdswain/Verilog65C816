@@ -132,6 +132,9 @@ module soc #(
     output wire        ext_wr_n,
     output wire        ext_res_n,
     input  wire        ext_irq_n,
+    // DMA (dma.v, docs/DMA.md): the devices' requests, and terminal count
+    input  wire [1:0]  dma_drq,
+    output wire        dma_tc,
     // Sound: I2S to the board's MAX98357A, and its enable (see sound.v)
     output wire        i2s_bclk,
     output wire        i2s_lrck,
@@ -158,18 +161,25 @@ module soc #(
     wire [7:0]  ext_q;
     wire        ext_ack;
     wire        ext_irq;
+    wire        dma_irq;
 
-    // The SCC and the external card share the 816's single IRQ line. It is a level input sampled between instructions, so registering
+    // The SCC, the external cards and the DMA engine share the 816's single IRQ line. It is a level input sampled between instructions, so registering
     // the merge costs nothing and keeps the extra gate out of the CPU's own
     // logic.
     reg irq_n;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) irq_n <= 1'b1;
-        else        irq_n <= scc_int_n & ~ext_irq;
+        else        irq_n <= scc_int_n & ~ext_irq & ~dma_irq;
     end
 
     wire [7:0] sdram_q;
     wire [7:0] blt_q;
+    wire [7:0] dma_q;
+    // The DMA engine's cycles on the external bus (external_bus.v's DMA port)
+    wire        dma_breq, dma_bwe, dma_btc, dma_back;
+    wire [2:0]  dma_bslot;
+    wire [7:0]  dma_bwdata;
+    wire [7:0]  bridge_q;
     wire       sdram_ack;
     wire       sdram_init_done;
     wire [31:0] cache_hits, cache_misses;
@@ -221,6 +231,7 @@ module soc #(
     wire sel_extc = io_lo & (addr[10:6] == 5'd13);           // $0340-$037F
     wire sel_vid  = io_lo & (addr[10:6] == 5'd14);           // $0380-$03BF
     wire sel_blt  = io_lo & (addr[10:6] == 5'd15);           // $03C0-$03FF
+    wire sel_dma  = io_lo & (addr[10:6] == 5'd16);           // $0400-$043F
     wire sel_snd  = io_lo & (addr[10:7] == 4'b1010);         // $0500-$057F
     wire sel_r6501 = (MAP == MAP_FORTH) & bank0 & (addr[15:8] == 8'h00)
                    & (addr[7:0] >= 8'h15) & (addr[7:0] <= 8'h17);
@@ -372,11 +383,12 @@ module soc #(
         wire [3:0]  c_mwmask;
 
         // The memory-master port's signals (see below), declared here because
-        // the cache snoops them.
+        // the cache snoops them: port 2 as mm_mux drives it.
         wire        b_req, b_we, b_done, b_rvalid;
         wire [20:0] b_addr;
         wire [31:0] b_wdata;
         wire [3:0]  b_wmask;
+        wire        c_wr_busy;
 
         cache u_cache (
             .clk(clk), .rst_n(rst_n),
@@ -389,20 +401,57 @@ module soc #(
             // the cache never serves what a blit has since overwritten. The
             // master holds its request through the cycle `done` is high.
             .inv_valid(b_done & b_we), .inv_addr(b_addr),
+            .wr_busy(c_wr_busy),
             .stat_hits(cache_hits), .stat_misses(cache_misses)
         );
 
         // The memory-master port: port 2 of the burst controller, below the
-        // display and above the CPU. The blitter is its only user so far; DMA
-        // would share it through a multiplexer here.
+        // display and above the CPU. The blitter and the DMA engine share it
+        // through mm_mux, the engine first.
+        wire        bl_req, bl_we, bl_done, bl_rvalid;
+        wire [20:0] bl_addr;
+        wire [31:0] bl_wdata;
+        wire [3:0]  bl_wmask;
+        wire        dm_req, dm_we, dm_done, dm_rvalid;
+        wire [20:0] dm_addr;
+        wire [31:0] dm_wdata;
+        wire [3:0]  dm_wmask;
+
         blitter u_blitter (
             .clk(clk), .rst_n(rst_n),
             .reg_addr(addr[4:0]), .wdata(wdata), .rdata(blt_q),
             .cs(stb & sel_blt), .we(we),
-            .m_req(b_req), .m_we(b_we), .m_addr(b_addr),
-            .m_wdata(b_wdata), .m_wmask(b_wmask),
-            .m_done(b_done), .m_rvalid(b_rvalid), .m_rdata(m_rdata),
+            .m_req(bl_req), .m_we(bl_we), .m_addr(bl_addr),
+            .m_wdata(bl_wdata), .m_wmask(bl_wmask),
+            .m_done(bl_done), .m_rvalid(bl_rvalid), .m_rdata(m_rdata),
             .busy()
+        );
+
+        dma u_dma (
+            .clk(clk), .rst_n(rst_n),
+            .reg_addr(addr[4:0]), .wdata(wdata), .rdata(dma_q),
+            .cs(stb & sel_dma), .we(we), .irq(dma_irq),
+            .drq(dma_drq),
+            .b_req(dma_breq), .b_we(dma_bwe), .b_slot(dma_bslot),
+            .b_tc(dma_btc), .b_wdata(dma_bwdata),
+            .b_rdata(bridge_q), .b_ack(dma_back),
+            .m_req(dm_req), .m_we(dm_we), .m_addr(dm_addr),
+            .m_wdata(dm_wdata), .m_wmask(dm_wmask),
+            .m_done(dm_done), .m_rvalid(dm_rvalid), .m_rdata(m_rdata),
+            .wr_busy(c_wr_busy)
+        );
+
+        mm_mux u_mm_mux (
+            .clk(clk), .rst_n(rst_n),
+            .b_req(bl_req), .b_we(bl_we), .b_addr(bl_addr),
+            .b_wdata(bl_wdata), .b_wmask(bl_wmask),
+            .b_done(bl_done), .b_rvalid(bl_rvalid),
+            .d_req(dm_req), .d_we(dm_we), .d_addr(dm_addr),
+            .d_wdata(dm_wdata), .d_wmask(dm_wmask),
+            .d_done(dm_done), .d_rvalid(dm_rvalid),
+            .p_req(b_req), .p_we(b_we), .p_addr(b_addr),
+            .p_wdata(b_wdata), .p_wmask(b_wmask),
+            .p_done(b_done), .p_rvalid(b_rvalid)
         );
 
         // Video owns port 0 and outranks the CPU on port 1.
@@ -456,6 +505,13 @@ module soc #(
         assign vid_hsync = 1'b1; assign vid_vsync = 1'b1; assign vid_de = 1'b0;
         assign sdram_q         = 8'hFF;
         assign blt_q           = 8'hFF;
+        assign dma_q           = 8'hFF;
+        assign dma_irq         = 1'b0;
+        assign dma_breq        = 1'b0;
+        assign dma_bwe         = 1'b0;
+        assign dma_bslot       = 3'd0;
+        assign dma_btc         = 1'b0;
+        assign dma_bwdata      = 8'd0;
         assign cache_hits      = 32'd0;
         assign cache_misses    = 32'd0;
         assign sdram_ack       = 1'b1;
@@ -529,7 +585,6 @@ module soc #(
     wire       scc_slot = (addr[6:4] == 3'd2);     // slot 2, mirrored as the bridge's
     wire       scc_req  = vld & sel_ext & scc_slot;
     wire [7:0] scc_q;
-    wire [7:0] bridge_q;
     wire       bridge_ack;
     reg  [1:0] scc_st;                  // 0 idle, 1 ack, 2 gap
     wire       scc_cs = scc_req & (scc_st == 2'd0);
@@ -558,10 +613,12 @@ module soc #(
         .clk(clk), .rst_n(rst_n),
         .addr(addr[10:0]), .wdata(wdata), .rdata(bridge_q),
         .req(vld & sel_ext & ~scc_slot), .we(we), .ack(bridge_ack),
+        .dma_req(dma_breq), .dma_we(dma_bwe), .dma_slot(dma_bslot),
+        .dma_tc(dma_btc), .dma_wdata(dma_bwdata), .dma_ack(dma_back),
         .card_reset(card_reset), .irq(ext_irq),
         .ext_a(ext_a), .ext_d_in(ext_d_in), .ext_d_out(ext_d_out),
         .ext_d_oe(ext_d_oe), .ext_sel(ext_sel), .ext_sel_en_n(ext_sel_en_n),
-        .ext_rd_n(ext_rd_n), .ext_wr_n(ext_wr_n),
+        .ext_rd_n(ext_rd_n), .ext_wr_n(ext_wr_n), .ext_tc(dma_tc),
         .ext_res_n(ext_res_n), .ext_irq_n(ext_irq_n)
     );
 
@@ -590,7 +647,7 @@ module soc #(
     // Anything unclaimed reads $FF: it takes the I/O path, and the palette,
     // the SD card slot and the empty ranges set none of the flops.
     //------------------------------------------------------------------
-    reg r_ser, r_adb, r_extc, r_sys, r_vid, r_blt, r_snd, r_none;
+    reg r_ser, r_adb, r_extc, r_sys, r_vid, r_blt, r_dma, r_snd, r_none;
 
     always @(posedge clk) if (stb) begin
         rom_r  <= sel_rom;
@@ -601,18 +658,21 @@ module soc #(
         r_sys  <= sel_sys;
         r_vid  <= sel_vid;
         r_blt  <= sel_blt;
+        r_dma  <= sel_dma;
         r_snd  <= sel_snd;
         r_none <= ~(sel_ser | sel_adb | sel_extc | sel_sys | sel_vid | sel_blt
-                    | sel_snd);
+                    | sel_dma | sel_snd);
     end
 
-    // The ADB host's and the blitter's read data are combinational from the
+    // The ADB host's, the blitter's and the DMA engine's read data are
+    // combinational from the
     // address, which put address -> device mux -> rdata -> ALU back on the
     // critical path. Capture them on the strobe.
-    reg [7:0] adb_q_r, blt_q_r;
+    reg [7:0] adb_q_r, blt_q_r, dma_q_r;
     always @(posedge clk) if (stb) begin
         adb_q_r <= adb_q;
         blt_q_r <= blt_q;
+        dma_q_r <= dma_q;
     end
 
     wire [7:0] io_q = ({8{r_ser}}  & ser_q)
@@ -621,6 +681,7 @@ module soc #(
                     | ({8{r_sys}}  & sys_q)
                     | ({8{r_vid}}  & vid_q)
                     | ({8{r_blt}}  & blt_q_r)
+                    | ({8{r_dma}}  & dma_q_r)
                     | ({8{r_snd}}  & snd_q)
                     | {8{r_none}};
 

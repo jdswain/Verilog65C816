@@ -89,6 +89,12 @@ module cache #(
     input  wire        inv_valid,
     input  wire [20:0] inv_addr,     // word address, as on the SDRAM port
 
+    // ---- a posted store is on its way to SDRAM ----
+    // From the cycle the CPU is released until the write retires. Another
+    // master that reads what the CPU has just written waits for this: port 2
+    // outranks the CPU's port and could otherwise read the old word.
+    output wire        wr_busy,
+
     // ---- statistics, for measuring what the cache actually buys ----
     output reg  [31:0] stat_hits,
     output reg  [31:0] stat_misses
@@ -213,6 +219,7 @@ module cache #(
     wire inv_act     = inv_pend & inv_rd & ~inv_valid & ~fill_ending;
     wire inv_cur     = inv_act & cur_any & (cur_idx == inv_idx) & (cur_tag == inv_tag);
     reg       m_busy;             // an SDRAM transaction is in flight
+    assign wr_busy = m_busy & m_we;
 
     // byte lane helpers
     function [7:0] pick(input [31:0] w, input [1:0] b);
