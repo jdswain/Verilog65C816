@@ -219,7 +219,9 @@ Software can also reset the SCC by writing `$C0` to WR9.
 
 **Proposed.** There are two channels: channel 0 for SCSI and channel 1 for the
 floppy. The engine is in the FPGA, reads and writes SDRAM through the
-memory-master port, and uses the external bus to reach the device.
+memory-master port, and uses the external bus to reach the device. The
+engine's design, its registers and the plan are in [DMA.md](DMA.md); this
+section is the carrier's side.
 
 ### Signals
 
@@ -270,17 +272,9 @@ bandwidth.
 
 ### Registers
 
-The proposed registers are at `$0400`, which is unclaimed today. Each channel
-has 16 bytes:
-
-| Offset | Register | |
-|---|---|---|
-| +0 to +2 | ADDR | 24-bit memory address |
-| +4 to +5 | COUNT | bytes to transfer |
-| +6 | CTRL | bit 0 enable, bit 1 direction (1 = memory to device), bit 2 assert `TC` on the last byte, bit 3 interrupt when done |
-| +7 | STATUS | bit 7 busy, bit 0 done (write 1 to clear) |
-
-Channel 0 is at `$0400`, channel 1 at `$0410`.
+At `$0400`, which is unclaimed today: channel 0 at `$0400`, channel 1 at
+`$0410`, each with a 24-bit address, a 24-bit count, a control and a status
+register. See [DMA.md](DMA.md#registers).
 
 ### SCC DMA
 
@@ -620,6 +614,8 @@ to the section that explains it.
 - [ ] A pull-up to 3.3V on the interrupt node, which goes to pin 19.
 - [ ] `DRQ0` (53C80) and `DRQ1` (82077AA) to pins 79 and 80, through the
       LVC buffer.
+- [ ] Pull-downs on both `DRQ` inputs to the buffer, on the 5V side: the
+      82077AA tristates `DRQ` while its DMA gate is off ([DMA.md](DMA.md)).
 - [ ] `TC` from pin 85 to the 82077AA `TC`, and through an inverter to the
       53C80 `/EOP`.
 - [ ] Decoder outputs 1 and 4 to the 82077AA and 53C80 `/DACK`.
