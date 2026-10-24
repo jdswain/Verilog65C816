@@ -51,7 +51,7 @@ BIT      := impl/pnr/soc816.fs
 PROG     := $(GOWIN)/Programmer/bin/programmer_cli
 DEVICE   := GW2AR-18C
 
-.PHONY: all sim real send lint rom image show memtest exttest dmatest romswitch adbtest fbtest maptest imgload texttest blttest font forth forth-load forth-rom forth-bit mandel mandel-load bit prog boot talk flash scan clean
+.PHONY: all sim real send lint rom image show memtest exttest dmatest timertest romswitch adbtest fbtest maptest imgload texttest blttest font forth forth-load forth-rom forth-bit mandel mandel-load bit prog boot talk flash scan clean
 
 all: sim
 
@@ -157,6 +157,10 @@ exttest:
 # The DMA engine's memory side, on the bare board (DRQ1 is pulled high).
 dmatest:
 	cd rom && $(AS816) -o dmatest.mem dmatest.asm
+
+# The tick timer and interrupt status, on IRQ.
+timertest:
+	cd rom && $(AS816) -o timertest.mem timertest.asm
 
 # $readmemh resolves relative to the tool's working directory, and Gowin runs
 # synthesis from impl/gwsynthesis/, so the path has to be absolute.

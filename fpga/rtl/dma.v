@@ -52,6 +52,7 @@ module dma #(
     input  wire        cs,               // one-cycle strobe
     input  wire        we,
     output wire        irq,
+    output wire [1:0]  irq_ch,           // each channel's DONE & IE, for $0440
 
     // ---- devices ----
     input  wire [1:0]  drq,              // asynchronous, active high
@@ -134,7 +135,8 @@ module dma #(
         end
     end
 
-    assign irq = |(done & ie);
+    assign irq_ch = done & ie;
+    assign irq    = |irq_ch;
 
     //------------------------------------------------------------------
     // Register reads

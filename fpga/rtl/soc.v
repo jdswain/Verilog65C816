@@ -161,15 +161,34 @@ module soc #(
     wire [7:0]  ext_q;
     wire        ext_ack;
     wire        ext_irq;
-    wire        dma_irq;
+    wire [1:0]  dma_irq;
+    wire        tmr_irq;
 
-    // The SCC, the external cards and the DMA engine share the 816's single IRQ line. It is a level input sampled between instructions, so registering
-    // the merge costs nothing and keeps the extra gate out of the CPU's own
+    //------------------------------------------------------------------
+    // Interrupt status and mask, $0440
+    //
+    // The tick timer, the DMA engine's two channels, the external cards and
+    // the SCC share the 816's single IRQ line. $0440 shows which of them is
+    // asking, so the handler reads one register before going to the chips:
+    //   $0440 ISTAT (read)  0 timer, 1 DMA channel 0, 2 DMA channel 1,
+    //                       3 cards, 4 SCC; each is the source's own level
+    //                       (cleared at the source), before the mask. Bit
+    //                       4 is the emulated SCC; the real one will be on
+    //                       the card line, bit 3
+    //   $0441 IMASK         1 = the source reaches the IRQ; $FF at reset
+    // The rest of $0440-$044F reads 0; the tick timer is at $0450
+    // (timer.v), and $0440-$045F repeats at $0460.
+    //
+    // IRQ is a level input sampled between instructions, so registering the
+    // merge costs nothing and keeps the extra gates out of the CPU's own
     // logic.
+    //------------------------------------------------------------------
+    wire [7:0] istat = {3'd0, ~scc_int_n, ext_irq, dma_irq, tmr_irq};
+    reg  [7:0] imask;
     reg irq_n;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) irq_n <= 1'b1;
-        else        irq_n <= scc_int_n & ~ext_irq & ~dma_irq;
+        else        irq_n <= ~|(istat & imask);
     end
 
     wire [7:0] sdram_q;
@@ -232,6 +251,7 @@ module soc #(
     wire sel_vid  = io_lo & (addr[10:6] == 5'd14);           // $0380-$03BF
     wire sel_blt  = io_lo & (addr[10:6] == 5'd15);           // $03C0-$03FF
     wire sel_dma  = io_lo & (addr[10:6] == 5'd16);           // $0400-$043F
+    wire sel_irq  = io_lo & (addr[10:6] == 5'd17);           // $0440-$047F
     wire sel_snd  = io_lo & (addr[10:7] == 4'b1010);         // $0500-$057F
     wire sel_r6501 = (MAP == MAP_FORTH) & bank0 & (addr[15:8] == 8'h00)
                    & (addr[7:0] >= 8'h15) & (addr[7:0] <= 8'h17);
@@ -430,7 +450,7 @@ module soc #(
         dma u_dma (
             .clk(clk), .rst_n(rst_n),
             .reg_addr(addr[4:0]), .wdata(wdata), .rdata(dma_q),
-            .cs(stb & sel_dma), .we(we), .irq(dma_irq),
+            .cs(stb & sel_dma), .we(we), .irq(), .irq_ch(dma_irq),
             .drq(dma_drq),
             .b_req(dma_breq), .b_we(dma_bwe), .b_slot(dma_bslot),
             .b_tc(dma_btc), .b_wdata(dma_bwdata),
@@ -506,7 +526,7 @@ module soc #(
         assign sdram_q         = 8'hFF;
         assign blt_q           = 8'hFF;
         assign dma_q           = 8'hFF;
-        assign dma_irq         = 1'b0;
+        assign dma_irq         = 2'd0;
         assign dma_breq        = 1'b0;
         assign dma_bwe         = 1'b0;
         assign dma_bslot       = 3'd0;
@@ -572,6 +592,26 @@ module soc #(
     end
 
     wire [7:0] extc_q = {7'd0, ext_irq};
+
+    //------------------------------------------------------------------
+    // Interrupt mask ($0441) and the tick timer ($0450); see $0440 above
+    //------------------------------------------------------------------
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)                                     imask <= 8'hFF;
+        else if (stb & sel_irq & we & ~addr[4] & (addr[3:0] == 4'd1))
+                                                        imask <= wdata;
+    end
+
+    wire [7:0] tmr_q;
+    timer u_timer (
+        .clk(clk), .rst_n(rst_n),
+        .reg_addr(addr[3:0]), .wdata(wdata), .rdata(tmr_q),
+        .cs(stb & sel_irq & addr[4]), .we(we), .pending(tmr_irq)
+    );
+
+    wire [7:0] irq_q = addr[4]             ? tmr_q :
+                       addr[3:0] == 4'd0   ? istat :
+                       addr[3:0] == 4'd1   ? imask : 8'd0;
 
     //------------------------------------------------------------------
     // Emulated SCC, $0820-$082F
@@ -647,7 +687,7 @@ module soc #(
     // Anything unclaimed reads $FF: it takes the I/O path, and the palette,
     // the SD card slot and the empty ranges set none of the flops.
     //------------------------------------------------------------------
-    reg r_ser, r_adb, r_extc, r_sys, r_vid, r_blt, r_dma, r_snd, r_none;
+    reg r_ser, r_adb, r_extc, r_sys, r_vid, r_blt, r_dma, r_irq, r_snd, r_none;
 
     always @(posedge clk) if (stb) begin
         rom_r  <= sel_rom;
@@ -659,20 +699,21 @@ module soc #(
         r_vid  <= sel_vid;
         r_blt  <= sel_blt;
         r_dma  <= sel_dma;
+        r_irq  <= sel_irq;
         r_snd  <= sel_snd;
         r_none <= ~(sel_ser | sel_adb | sel_extc | sel_sys | sel_vid | sel_blt
-                    | sel_dma | sel_snd);
+                    | sel_dma | sel_irq | sel_snd);
     end
 
-    // The ADB host's, the blitter's and the DMA engine's read data are
-    // combinational from the
-    // address, which put address -> device mux -> rdata -> ALU back on the
-    // critical path. Capture them on the strobe.
-    reg [7:0] adb_q_r, blt_q_r, dma_q_r;
+    // The ADB host's, the blitter's, the DMA engine's and $0440's read data
+    // are combinational from the address, which put address -> device mux ->
+    // rdata -> ALU back on the critical path. Capture them on the strobe.
+    reg [7:0] adb_q_r, blt_q_r, dma_q_r, irq_q_r;
     always @(posedge clk) if (stb) begin
         adb_q_r <= adb_q;
         blt_q_r <= blt_q;
         dma_q_r <= dma_q;
+        irq_q_r <= irq_q;
     end
 
     wire [7:0] io_q = ({8{r_ser}}  & ser_q)
@@ -682,6 +723,7 @@ module soc #(
                     | ({8{r_vid}}  & vid_q)
                     | ({8{r_blt}}  & blt_q_r)
                     | ({8{r_dma}}  & dma_q_r)
+                    | ({8{r_irq}}  & irq_q_r)
                     | ({8{r_snd}}  & snd_q)
                     | {8{r_none}};
 

@@ -83,7 +83,10 @@ window for the external bus:
 | `$0380`-`$03BF` | video control (graphics/text mode) |
 | `$03C0`-`$03FF` | blitter |
 | `$0400`-`$043F` | DMA engine: two channels for the carrier's SCSI and floppy (see [DMA](#dma----0400)) |
-| `$0440`-`$04FF` | unclaimed, reads `$FF` |
+| `$0440`-`$044F` | interrupt status and mask (see [Interrupts and the tick timer](#interrupts-and-the-tick-timer----0440)) |
+| `$0450`-`$045F` | tick timer |
+| `$0460`-`$047F` | `$0440`-`$045F` repeated |
+| `$0480`-`$04FF` | unclaimed, reads `$FF` |
 | `$0500`-`$057F` | sound: two SIDs and a control register (see [Sound](#sound)) |
 | `$0580`-`$07FF` | unclaimed, reads `$FF` |
 | `$0800`-`$0FFF` | external bus window: 8 slots x 16 registers |
@@ -322,8 +325,8 @@ specification.
 | +9 | `$0409` | `$0419` | STATUS: 7 BUSY, 6 DRQ, 0 DONE (write 1 to clear) |
 
 Load ADDR and COUNT, then write CTRL with EN set. DONE comes when COUNT is
-0 and every byte is in memory; with IE it raises the CPU's IRQ, ORed with
-the SCC and the cards. Writing EN = 0 stops a channel early; once BUSY
+0 and every byte is in memory; with IE it raises the CPU's IRQ, through
+bit 1 or 2 of `$0440`. Writing EN = 0 stops a channel early; once BUSY
 clears, ADDR and COUNT say where it stopped. ADDR and COUNT can't be written
 while BUSY. The engine's writes go past the cache, which drops any line
 they change, and it waits for the cache's posted store before reading.
@@ -331,6 +334,61 @@ they change, and it waits for the cache's posted store before reading.
 `make dmatest` builds a ROM that checks the memory side on the bare board:
 without the carrier pin 80 is pulled high, so channel 1 always sees a
 request and reads `$FF` from the pulled-up bus. It prints `dma: ok`.
+
+### Interrupts and the tick timer -- `$0440`
+
+Everything that interrupts shares the 816's one `IRQ` line. `$0440` says
+which sources are asking, so a handler reads it once and then goes only to
+the chips that are; `$0441` chooses which of them reach the line.
+
+| Address | Register |
+|---|---|
+| `$0440` | ISTAT, read only: 0 the tick timer, 1 DMA channel 0, 2 DMA channel 1, 3 the cards' `IRQ#`, 4 the SCC |
+| `$0441` | IMASK: 1 = that source reaches `IRQ`; `$FF` at reset |
+
+Bit 4 is the SCC emulated in the FPGA. The real Z85C80 on the carrier will
+interrupt on the shared card line, bit 3, so a handler that checks the
+SCC's RR3 for either bit works on both.
+
+Each ISTAT bit is the source's own level, shown whether or not it is masked,
+and is cleared at the source: STATUS of the timer or the DMA channel, the
+chip on the card, the SCC's own registers. The rest of `$0440`-`$044F`
+reads 0.
+
+The tick timer (`rtl/timer.v`) is for the operating system's clock. It counts
+system clocks down from RELOAD and sets PENDING at zero, every RELOAD clocks:
+
+| Address | Register |
+|---|---|
+| `$0450`, `$0451` | RELOAD, the period in system clocks, low first; 0 means 65536. 63000 is 2.5 ms (400 Hz) |
+| `$0452` | CTRL: bit 0 EN. Setting it starts a full period; clearing it stops the timer |
+| `$0453` | STATUS: bit 0 PENDING (write 1 to clear); this is ISTAT bit 0 |
+| `$0454`, `$0455` | NOW: clocks left until the next tick, minus 1, as latched by a read of `$0458` |
+| `$0458`-`$045B` | TICKS, the ticks since reset, low first |
+
+A RELOAD written while the timer runs takes effect at the next tick. TICKS
+counts every tick whether or not PENDING was cleared, so a system that ran
+with interrupts off for a while can tell how many it missed. Reading
+`$0458` latches the other three bytes of TICKS and NOW, so read `$0458`
+first; `TICKS * RELOAD + RELOAD - 1 - NOW` is then the time in clocks.
+
+```
+        lda #<63000
+        sta $0450
+        lda #>63000
+        sta $0451
+        lda #1
+        sta $0452               ; EN: a tick every 2.5 ms
+        ...
+irq     lda $0440               ; who is asking?
+        lsr a
+        bcc not_tick
+        lda #1
+        sta $0453               ; clear PENDING
+        ...
+```
+
+`make timertest` builds a ROM that checks both on IRQ. It prints `timer: ok`.
 
 ### External bus
 
@@ -398,8 +456,8 @@ res     dex
 
 The read side is the live state of the `IRQ#` pin, synchronised but not
 latched: it follows the card and clears when the card clears it. The card IRQ
-is ORed with the SCC's into the 816's single `IRQ` line, so an ISR must check
-both sources.
+is one of the sources of the 816's single `IRQ` line, bit 3 of `$0440`
+(see [Interrupts and the tick timer](#interrupts-and-the-tick-timer----0440)).
 
 #### Connector pinout
 

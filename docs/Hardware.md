@@ -31,7 +31,8 @@ Each item is marked:
 | SCSI (one internal, one external connector) | Z85C80 SCSI half (53C80) | Carrier | Proposed |
 | Floppy (one internal port, two drives) | 82077AA | Carrier | Proposed |
 | DMA, two channels | | FPGA | Built; untested on the board |
-| Interrupt status and mask | | FPGA | Proposed |
+| Interrupt status and mask | | FPGA | Built |
+| Tick timer, the operating system's clock | | FPGA | Built |
 | Sound, two SIDs | reDIP SID emulation | FPGA, onboard I2S amplifier; stereo DAC optional on the carrier | Built |
 | Ethernet | W5100S | Carrier, on the external bus | Open: proposed below |
 | SD card | | | **Not used**; its pins are free |
@@ -279,8 +280,10 @@ register. See [DMA.md](DMA.md#registers).
 
 ## Interrupts
 
-**Built:** the card `IRQ#` and the emulated SCC's interrupt are ORed onto the 65C816's single `IRQ`. Bit 0 of `$0340` reads the
-card line.
+**Built:** the tick timer, the two DMA channels, the card `IRQ#` and the
+emulated SCC share the 65C816's single `IRQ`, through the interrupt status
+and mask registers at `$0440` and `$0441` (below). Bit 0 of `$0340` still
+reads the card line.
 
 **Proposed:** keep one pin for the cards by wire-ORing their interrupts on the
 carrier.
@@ -305,17 +308,25 @@ Software finds the source by reading each chip:
 **82077AA in PC/AT mode:** `INT` and `DRQ` stay disabled until bit 3 of DOR
 (the DMA gate) is set. **Check.**
 
-**Proposed:** an interrupt status and mask register at `$0440`. It has one bit
-for each source the FPGA can tell apart:
-* the card line
-* the SCC (while it is emulated)
-* DMA channel 0 done
-* DMA channel 1 done
-* sound, if the SIDs get one
-* ADB, once ADB has interrupts
+**Built:** an interrupt status register at `$0440` with one bit for each
+source the FPGA can tell apart, and a mask at `$0441` (`$FF` at reset):
 
-Separating the card sources would need more pins. **Open:** `$0440` can be
-extended if pins turn up.
+| Bit | Source |
+|---|---|
+| 0 | the tick timer (`$0450`, `rtl/timer.v`) |
+| 1 | DMA channel 0 done |
+| 2 | DMA channel 1 done |
+| 3 | the card line |
+| 4 | the SCC (while it is emulated) |
+
+Bits 5-7 are free for sound, if the SIDs get an interrupt, and ADB, once
+it has one. Separating the card sources would need more pins. The register
+map is in `fpga/README.md`.
+
+The tick timer replaces the SCC's channel B baud-rate generator as OS16's
+clock: on the carrier channel B is a serial port, and the real SCC's
+`PCLK` comes from the carrier's oscillator, not the system clock. The
+timer is on `IRQ`, not `NMI`, so a tick can't interrupt an IRQ handler.
 
 ## Clocks
 
@@ -489,8 +500,9 @@ polled drivers to be written before the carrier exists:
   `-disk1`)
 * the 53C80 at `$0830` (`EmSCSI.Mod`), with a disk at SCSI ID 0 (`-scsi`)
 
-Neither emulates DMA. The 65Tools README covers both under "Disks under
--fpga".
+Both can also move their data by DMA, with the SoC's engine (`EmDMA.Mod`).
+em16 has the tick timer and `$0440` as well (`EmTimer.Mod`). The 65Tools
+README covers the disks under "Disks under -fpga".
 
 ### Later
 
@@ -704,5 +716,5 @@ to the section that explains it.
    * ~~select code and enable~~ (done)
    * ~~the SCC reset on `RES#`~~ (done)
    * ~~the DMA engine and its multiplexer on the memory-master port~~ (done)
-   * the interrupt register
+   * ~~the interrupt register~~ (done, with the tick timer)
    * the `.cst` pin moves

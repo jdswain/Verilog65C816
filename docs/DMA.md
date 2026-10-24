@@ -1,7 +1,8 @@
 # DMA for SCSI and the floppy
 
 **Built in the FPGA** (`rtl/dma.v`, `rtl/mm_mux.v`, tested by `sim/tb_dma.v`
-and `rom/dmatest.asm`); em16 and OS16 are still to do. A two-channel DMA
+and `rom/dmatest.asm`), and in em16 (`EmDMA.Mod`, tested by `test/dma.sh`);
+the OS16 drivers are still to do. A two-channel DMA
 engine in the FPGA that moves bytes between
 SDRAM and the carrier's 53C80 (SCSI) and 82077AA (floppy), with a model of
 it in em16 and DMA modes in em16's two chips, so that OS16's drivers can use
@@ -114,8 +115,8 @@ Channel 0 is at `$0400`, channel 1 at `$0410`.
 * COUNT and ADDR change while the channel runs; reading three bytes of a
   running channel can tear. Stop it first, or wait for DONE.
 * IRQ: the engine raises the CPU's IRQ while either channel has DONE and IE
-  set, ORed in `soc.v` with the SCC and the cards. Writing 1 to STATUS bit 0
-  clears it. OS16's probe reads `$0409` and `$0419`.
+  set; bits 1 and 2 of the interrupt status at `$0440` say which. Writing 1
+  to STATUS bit 0 clears it.
 
 ### Programming a transfer
 
@@ -308,8 +309,8 @@ channel 0 never runs.
 
 ## em16
 
-em16 has the 82077AA (`Em82077`) and the 53C80 (`EmSCSI`) at their carrier
-addresses, without DMA. The model needs:
+**Built** (65Tools `em16`). em16 had the 82077AA (`Em82077`) and the 53C80
+(`EmSCSI`) at their carrier addresses, without DMA. The model has:
 
 * **The eight-slot decode** in `EmSoC`'s card access (`card := AND(a DIV
   16, 7)`): today `$0840`, the 53C80's `/DACK` slot, decodes as the floppy.
@@ -366,8 +367,10 @@ Each step can be tested before the next starts.
    simulation, a timing build, and the bare-board test through `DRQ1`
    (`make dmatest`; it passes in the SoC simulation with `+drq1`, and has
    still to be run on the board).
-3. **em16:** the decode, `EmDMA`, and the two chips' DMA modes, with
-   `test/dma.s`.
+3. **Done.** em16: the decode, `EmDMA`, and the two chips' DMA modes, with
+   `test/dma.s`. The 82077AA's read bytes arrive at the data rate in DMA
+   mode and overrun the FIFO if not taken; polled transfers still never
+   overrun (the OS16 ToDo's item), so the polled driver keeps working.
 4. **OS16:** Floppy, then SCSIManager, then a test that sectors move with
    interrupts on and other processes running.
 5. **The carrier:** the DMA wiring and pull-downs, and the **Check** items
