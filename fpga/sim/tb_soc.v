@@ -11,6 +11,8 @@
 //============================================================================
 `timescale 1ns / 1ps
 `default_nettype none
+// The ROM `make` chose (ROM=, default MiniMon), sized to its image
+`include "rom_path.vh"
 
 module tb_soc #(
     // Overridable at build time, e.g.
@@ -24,14 +26,15 @@ module tb_soc #(
     // gap overruns the SCC's three-byte receive FIFO -- which is what a real
     // terminal paste does too. A human typing leaves a gap this wide.
     parameter integer TYPE_GAP = 30,
-    parameter         ROM_HEX   = "fpga/rom/minimon.mem",
+    // The image as the ROM holds it (rtl/rom_image.mem, padded to the ROM's
+    // size) and the ROM's size and base, from rom_path.vh. To run another
+    // image, `make sim ROM=rom/X.mem` rather than overriding these: the
+    // three must agree, or the reset vector is fetched from past the end
+    // of the loaded image, reads x, and the SoC sits there with rdy = x.
+    parameter         ROM_HEX   = `ROM_HEX_PATH,
     parameter integer MAP       = 0,
-    // Must match the Makefile's defaults. These were left at the old 8 KB
-    // ROM at $E000 when the I/O block took $E000 and the ROM moved to $F000,
-    // which put the reset vector past the end of the loaded image: the fetch
-    // read x and the whole SoC sat there with rdy = x.
-    parameter integer ROM_BITS  = 13,
-    parameter [15:0]  ROM_BASE  = 16'hE000,
+    parameter integer ROM_BITS  = `ROM_BITS_DEF,
+    parameter [15:0]  ROM_BASE  = `ROM_BASE_DEF,
     parameter integer SEND_DELAY = 200_000,
     // Words of SDRAM modelled: all 8 MB, because the monitor's console writes
     // the text screen at $70_0000. Run with +screen to print that screen at

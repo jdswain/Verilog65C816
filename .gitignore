@@ -17,6 +17,7 @@ impl/
 /fpga/*_sim
 *.vcd
 /fpga/rtl/rom_path.vh
+/fpga/rtl/rom_image.mem
 
 # FPGA ROMs: keep the sources, and the two images whose source is elsewhere
 /fpga/rom/*

@@ -57,7 +57,7 @@ the 5V peripherals on a carrier (SCC, SCSI, floppy, DMA), is specified in
 | `$00_0000`-`$7F_FFFF` | 8 MB | SDRAM (in-package die) |
 | &nbsp;&nbsp;`$00_0000`-`$00_01FF` | 512 B | RAM -- zero page and stack, never decoded as I/O |
 | &nbsp;&nbsp;`$00_0200`-`$00_0FFF` | 3.5 KB | I/O block, overlaid in bank 0 |
-| &nbsp;&nbsp;`$00_E000`-`$00_FFFF` | 8 KB | boot ROM (16-bit wide), overlaid, **switchable** |
+| &nbsp;&nbsp;`$00_E000`-`$00_FFFF` | 8 KB | boot ROM (16-bit wide), overlaid, **switchable**; 16 or 32 KB from `$C000` or `$8000` for a larger image (see [Boot ROM](#boot-rom)) |
 | `$80_0000`-`$FF_FFFF` | 8 MB | unmapped, reads `$FF` |
 
 I/O sits at the **bottom** of bank 0 because the boot ROM wants the whole
@@ -99,7 +99,7 @@ Anything unclaimed in the block reads `$FF`.
 
 | Bit | Write | Read |
 |---|---|---|
-| 0 | 1 = boot ROM mapped at `$E000`-`$FFFF`, 0 = SDRAM mapped there | current setting |
+| 0 | 1 = boot ROM mapped at `$E000`-`$FFFF` (or from `$C000` or `$8000` for a larger ROM), 0 = SDRAM mapped there | current setting |
 | 1-7 | ignored | 0 |
 
 The bit **resets to 1**, because there is nothing else to boot from: SDRAM is
@@ -121,7 +121,7 @@ shadow  lda.w $e000,x           ; reads come from ROM
 ```
 
 Execution continues straight across the `stz` because both sides hold identical
-bytes. Afterwards the 8 KB is ordinary cached memory: patchable, and no longer
+bytes. Afterwards the range is ordinary cached memory: patchable, and no longer
 costing a ROM rebuild to change. **Clearing the bit without shadowing first
 fetches the next instruction out of uninitialised RAM** -- and takes the
 interrupt and reset vectors at `$FFE0`-`$FFFF` with it.
@@ -1402,6 +1402,24 @@ transparent.
 
 8 KB at `$E000`-`$FFFF`, **16 bits wide**, and switchable out for RAM (see
 [System control](#system-control----0300)).
+
+**Sized to its image.** The Makefile (`tools/romimage.py`) makes the ROM the
+smallest of 8, 16 or 32 KB that holds the image, at `$E000`, `$C000` or
+`$8000`. An image ends at `$FFFF` with the vectors (`as -o X.mem` writes from
+its `org` up), so one that is not a whole size is placed at the top of the ROM
+with `$FF` below it; `rtl/rom_image.mem` is the image as the ROM holds it. Only
+as much of bank 0 reads as ROM as the image needs, and writes anywhere in
+the range go to SDRAM, so a loader can put a kernel underneath before it maps
+the ROM out. A bigger image needs nothing else: `make bit ROM=rom/X.mem`, and
+`make sim ROM=rom/X.mem` simulates the same ROM. em16 sizes its `-bootrom`
+image the same way. `make romsize` builds a 16 KB test ROM whose code starts
+at `$C000`; it prints `romsize: ok`.
+
+Block RAM: the 8 KB ROM takes 4 of the 46 blocks, 16 KB takes 8 (27 of 46 in
+use; built at 32.3 MHz, no negative slack), and 32 KB would take 16.
+
+Anything that keeps RAM there must move when the ROM grows: OS16's boot
+loader keeps its variables at `$C000`, so a 16 KB ROM needs them elsewhere.
 
 The width is because instruction fetch is by far the largest source of bus
 traffic and the 65C816 fetches it a byte at a time, so a 16-bit word covers two

@@ -10,7 +10,9 @@
 //   $00_0000-$7F_FFFF   SDRAM  8 MB   (in-package die), except:
 //     $00_0000-$00_01FF RAM           (never decoded as I/O -- see below)
 //     $00_0200-$00_0FFF I/O    3.5 KB (see below)
-//     $00_E000-$00_FFFF ROM    8 KB   (block RAM, loaded from ROM_HEX)
+//     $00_E000-$00_FFFF ROM    8 KB   (block RAM, loaded from ROM_HEX); 16
+//                                     or 32 KB from $C000 or $8000 with
+//                                     ROM_BITS 14 or 15
 //   $80_0000-$FF_FFFF   unmapped, reads $FF
 //
 // I/O lives at the BOTTOM of bank 0, because the boot ROM now wants the whole
@@ -27,7 +29,9 @@
 //   $0340-$037F   external bus control (external_bus.v)
 //   $0380-$03BF   video control (graphics/text mode)
 //   $03C0-$03FF   blitter (blitter.v)
-//   $0400-$04FF   unclaimed, reads $FF
+//   $0400-$043F   DMA engine (dma.v)
+//   $0440-$047F   interrupt status and mask, tick timer (timer.v)
+//   $0480-$04FF   unclaimed, reads $FF
 //   $0500-$057F   sound: two SIDs and a control register (sound.v)
 //   $0580-$07FF   unclaimed, reads $FF
 //   $0800-$0FFF   external bus window -- 4 cards x 16 registers:
@@ -38,10 +42,14 @@
 //                 port, which answers instead of card 2.
 //
 // The boot ROM is a SOFT SWITCH. $0300 bit 0 resets to 1 (ROM mapped) and
-// clearing it hands $E000-$FFFF back to SDRAM, vectors included. Writes to
-// $E000-$FFFF always go to SDRAM whichever way the switch is set, so the boot
-// ROM can copy itself into the RAM underneath and then flip the switch --
-// after which the 8 KB is ordinary cached memory.
+// clearing it hands the ROM's range back to SDRAM, vectors included. Writes
+// there always go to SDRAM whichever way the switch is set, so the boot ROM
+// can copy itself, or load anything else, into the RAM underneath and then
+// flip the switch -- after which the range is ordinary cached memory.
+//
+// The Makefile sizes the ROM to its image (tools/romimage.py): the smallest
+// of 8, 16 or 32 KB that holds it, so only as much of bank 0 reads as ROM
+// as the image needs.
 //
 // The SDRAM die is 64 Mbit = 8 MB, which is exactly banks $00-$7F. The other
 // half of the 65C816's 16 MB space has no storage behind it: covering it would
@@ -348,7 +356,8 @@ module soc #(
     // straight off the block RAM output register.
     //
     // The image is a byte-wide memory file (`as -o rom.mem`): the bytes of
-    // the ROM in order from its base, with no addresses in it. A word is read
+    // the ROM in order from its base, with no addresses in it, ROM_BYTES of
+    // them (the Makefile pads a shorter image at the bottom). A word is read
     // as its two bytes.
     //------------------------------------------------------------------
     localparam integer ROM_BYTES = (1 << ROM_BITS);
