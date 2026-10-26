@@ -51,12 +51,22 @@
 //   $0E-$0F  HEIGHT      lines, 1..65535
 //   $10      OP          logic operation, low four bits (see below)
 //   $11      COLOUR      low nibble: fill colour; high nibble: transparent colour
-//   $12      CONTROL     write: bit 0 start, bit 1 fill, bit 2 transparent
-//                        read:  bit 7 busy, bits 2-1 as written
+//   $12      CONTROL     write: bit 0 start, bit 1 fill, bit 2 transparent,
+//                               bit 3 pattern
+//                        read:  bit 7 busy, bits 3-1 as written
+//   $13      PAT_Y       bits 2-0: the pattern row for the first line
+//   $20-$3F  PATTERN     8 x 8 pixels, row r in bytes 4r..4r+3, the even pixel
+//                        of each byte in its low nibble, as the screen has them
 //
 // With "fill" set the source is the fill colour instead of memory, and SRC and
-// SRC_STRIDE are ignored. With "transparent" set, source pixels equal to the
-// transparent colour leave the destination alone.
+// SRC_STRIDE are ignored. With "pattern" set the source is the pattern instead
+// (it wins over "fill"; SRC and SRC_STRIDE are again ignored): a pixel's column
+// in it is its destination pixel address mod 8, and the row is PAT_Y for the
+// first line, then the next row, mod 8, for each line after. A destination
+// whose line starts and stride are multiples of 8 pixels -- the screen -- so
+// has the pattern aligned to its own x mod 8, and PAT_Y = top mod 8 aligns it
+// to y too, as QuickDraw aligns patterns. With "transparent" set, source
+// pixels equal to the transparent colour leave the destination alone.
 //
 // OP is a truth table over (source, destination), applied to each bit:
 //   bit 0: result where S=1 D=1      bit 2: result where S=0 D=1
@@ -65,7 +75,8 @@
 // 15 = set -- the ST's numbering.
 //
 // Registers written while a blit is running are ignored. SRC, DST and HEIGHT
-// are not changed by a blit, so the same one can be started again.
+// are not changed by a blit, so the same one can be started again. CONTROL,
+// PAT_Y and PATTERN read back; the other registers read $FF.
 //============================================================================
 `default_nettype none
 
@@ -74,7 +85,7 @@ module blitter (
     input  wire        rst_n,
 
     // register interface (one-cycle strobe, byte wide)
-    input  wire [4:0]  reg_addr,
+    input  wire [5:0]  reg_addr,
     input  wire [7:0]  wdata,
     output reg  [7:0]  rdata,
     input  wire        cs,
@@ -102,7 +113,9 @@ module blitter (
     reg [10:0] r_width;
     reg [15:0] r_height;
     reg [3:0]  r_op, r_fill, r_key;
-    reg        r_fillmode, r_trans;
+    reg        r_fillmode, r_trans, r_patmode;
+    reg [2:0]  r_paty;
+    reg [7:0]  r_pat [0:31];          // the pattern, a byte a register
 
     localparam [3:0] S_IDLE  = 4'd0,  S_LINE   = 4'd1,  S_SETUP  = 4'd2,
                      S_RSRC  = 4'd3,  S_RDST   = 4'd4,  S_RGAP   = 4'd5,
@@ -111,7 +124,7 @@ module blitter (
     reg [3:0] state;
     assign busy = (state != S_IDLE);
 
-    wire start = cs & we & (reg_addr == 5'h12) & wdata[0] & ~busy;
+    wire start = cs & we & (reg_addr == 6'h12) & wdata[0] & ~busy;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -119,9 +132,10 @@ module blitter (
             r_sstride <= 16'd0; r_dstride <= 16'd0;
             r_width <= 11'd0; r_height <= 16'd0;
             r_op <= 4'd3; r_fill <= 4'd0; r_key <= 4'd0;
-            r_fillmode <= 1'b0; r_trans <= 1'b0;
-        end else if (cs && we && !busy) begin
-            case (reg_addr)
+            r_fillmode <= 1'b0; r_trans <= 1'b0; r_patmode <= 1'b0;
+            r_paty <= 3'd0;
+        end else if (cs && we && !busy && !reg_addr[5]) begin
+            case (reg_addr[4:0])
             5'h00: r_src[7:0]       <= wdata;
             5'h01: r_src[15:8]      <= wdata;
             5'h02: r_src[23:16]     <= wdata;
@@ -138,15 +152,23 @@ module blitter (
             5'h0F: r_height[15:8]   <= wdata;
             5'h10: r_op             <= wdata[3:0];
             5'h11: {r_key, r_fill}  <= wdata;
-            5'h12: {r_trans, r_fillmode} <= wdata[2:1];
+            5'h12: {r_patmode, r_trans, r_fillmode} <= wdata[3:1];
+            5'h13: r_paty           <= wdata[2:0];
             default: ;
             endcase
         end
     end
 
+    // The pattern, out of the reset block: it needs none, and is then free to
+    // be distributed RAM.
+    always @(posedge clk)
+        if (cs && we && !busy && reg_addr[5]) r_pat[reg_addr[4:0]] <= wdata;
+
     always @* begin
-        if (reg_addr == 5'h12) rdata = {busy, 4'b0000, r_trans, r_fillmode, 1'b0};
-        else                   rdata = 8'hFF;
+        if (reg_addr[5])            rdata = r_pat[reg_addr[4:0]];
+        else if (reg_addr == 6'h12) rdata = {busy, 3'b000, r_patmode, r_trans, r_fillmode, 1'b0};
+        else if (reg_addr == 6'h13) rdata = {5'd0, r_paty};
+        else                        rdata = 8'hFF;
     end
 
     //------------------------------------------------------------------
@@ -171,6 +193,7 @@ module blitter (
     //------------------------------------------------------------------
     reg [23:0] cur_s, cur_d;          // this line's pixel addresses
     reg [15:0] lines;
+    reg [2:0]  prow;                  // this line's pattern row
 
     wire [4:0]  s_off5 = cur_s[4:0];  // start within the source buffer
     wire [4:0]  d_off5 = cur_d[4:0];
@@ -198,7 +221,13 @@ module blitter (
     reg  [31:0] s_lo;                 // source word below the one in sbuf_q
     wire [63:0] s_window = {sbuf_q, s_lo};
     wire [31:0] s_mem    = s_window[{sh, 2'b00} +: 32];
-    wire [31:0] s_word   = r_fillmode ? {8{r_fill}} : s_mem;
+    // A destination word starts at a multiple of 8 pixels, so its pixel p is
+    // column p of the pattern: the row is the source word as it stands.
+    wire [4:0]  prow4    = {prow, 2'b00};
+    wire [31:0] p_word   = {r_pat[prow4 + 5'd3], r_pat[prow4 + 5'd2],
+                            r_pat[prow4 + 5'd1], r_pat[prow4]};
+    wire [31:0] s_word   = r_patmode  ? p_word :
+                           r_fillmode ? {8{r_fill}} : s_mem;
     wire [31:0] d_word   = dbuf_q;
 
     // Four product terms per bit, selected by the operation.
@@ -250,6 +279,7 @@ module blitter (
                     cur_s <= r_src;
                     cur_d <= r_dst;
                     lines <= r_height;
+                    prow  <= r_paty;
                     // A blit with nothing in it is finished before it starts.
                     if (r_width != 11'd0 && r_height != 16'd0) state <= S_LINE;
                 end
@@ -272,7 +302,7 @@ module blitter (
             end
 
             S_SETUP: begin
-                if (r_fillmode) begin
+                if (r_fillmode || r_patmode) begin
                     m_addr <= {cur_d[23:5], 2'b00};
                     state  <= S_RDST;
                 end else begin
@@ -369,6 +399,7 @@ module blitter (
                     state <= S_FETCH;
                 end else if (lines != 16'd1) begin
                     lines <= lines - 16'd1;
+                    prow  <= prow + 3'd1;
                     cur_s <= cur_s + sstride_x;
                     cur_d <= cur_d + dstride_x;
                     state <= S_LINE;

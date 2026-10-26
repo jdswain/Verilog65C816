@@ -245,8 +245,9 @@ controller sustains; the rest is left for the CPU.
 
 ### Blitter -- `$03C0`
 
-Copies or fills a rectangle of pixels in hardware, combining source and
-destination through a logic operation and optionally skipping one colour. The
+Copies or fills a rectangle of pixels in hardware, with a colour or an 8x8
+pattern, combining source and destination through a logic operation and
+optionally skipping one colour. The
 register model is the Atari ST BLiTTER's; the differences come from this
 display being packed pixels rather than bitplanes.
 
@@ -272,17 +273,31 @@ registers: the blitter works them out from the addresses and the width.
 | `$03CE`-`$03CF` | HEIGHT | lines, 1-65535 |
 | `$03D0` | OP | logic operation, low 4 bits |
 | `$03D1` | COLOUR | low nibble: fill colour. High nibble: transparent colour |
-| `$03D2` | CONTROL | write: bit 0 start, bit 1 fill, bit 2 transparent. Read: bit 7 busy |
+| `$03D2` | CONTROL | write: bit 0 start, bit 1 fill, bit 2 transparent, bit 3 pattern. Read: bit 7 busy, bits 3-1 as written |
+| `$03D3` | PAT_Y | bits 2-0: the pattern row for the first line |
+| `$03E0`-`$03FF` | PATTERN | 8x8 pixels: row *r* in bytes 4*r* to 4*r*+3, the even pixel of each byte in its low nibble |
 
 Multi-byte registers are little-endian. Set everything up, write CONTROL with
 bit 0 set, then poll bit 7 until it clears. Writes while a blit is running are
-ignored. A blit does not change the registers, so the same one can be started
-again, or the next one can change only what differs.
+ignored, PATTERN's included. A blit does not change the registers, so the same
+one can be started again, or the next one can change only what differs.
+CONTROL, PAT_Y and PATTERN read back; the others read `$FF`.
 
 * **Fill** (bit 1): the source is the fill colour, not memory; SRC and
   SRC_STRIDE are ignored.
 * **Transparent** (bit 2): source pixels equal to the transparent colour leave
   the destination alone.
+* **Pattern** (bit 3): the source is the pattern, not memory; SRC and
+  SRC_STRIDE are ignored. It wins over fill if both are set. A pixel's column
+  in the pattern is its destination pixel address mod 8, and its row is PAT_Y
+  on the first line, then the next row, mod 8, on each line after.
+
+The pattern is aligned to the destination, as QuickDraw aligns it to the
+screen. On the screen the pixel base (`$E00000`) and the stride (640) are
+multiples of 8, so the column is *x* mod 8, and PAT_Y = *top* mod 8 makes the
+row *y* mod 8. A pattern in the bytes the screen would hold for an 8x8 tile at
+(0, 0) is written to PATTERN as it is. OP and transparency work as for a copy,
+the pattern as S: copy 3, OR 7, XOR 6, and BIC (D and not S) 4.
 
 OP is a truth table over source and destination bits, in the ST's numbering:
 
@@ -1371,6 +1386,10 @@ plus 8 minus the destination's offset within its first word. So the shift
 between them is the constant *K mod 8* pixels, and the source word index just
 counts up -- one 64-to-32-bit shifter and no per-word arithmetic.
 
+A fill or a pattern reads no source line. A destination word starts at a
+multiple of 8 pixels, so its pixel *p* is the pattern's column *p*: the
+source word is the pattern row as it stands, with no shifting.
+
 The destination line is always read, even for a plain copy that overwrites
 every pixel, because the partial words at each end need it and treating every
 word alike keeps the control simple. That is about a quarter of the bandwidth
@@ -1380,10 +1399,12 @@ and the obvious thing to optimise. Burst writes would be the next.
 
 `sim/tb_blitter.v` checks blits against a reference that knows nothing about
 words, shifts or masks: an array of pixels, updated the way the definition
-says. Ten directed cases (single pixel, full 1024 width, overlap, scrolling
-both ways, fill, XOR, transparency, zero width) and 400 random ones, with
-random alignment, strides of either sign, all 16 operations and deliberate
-overlap. A second master reads continuously on the CPU's port throughout, to
+says. Fifteen directed cases (single pixel, full 1024 width, overlap,
+scrolling both ways, fill, XOR, transparency, patterns with odd edges in the
+four QuickDraw modes, zero width) and 400 random ones, with random alignment,
+strides of either sign, all 16 operations, deliberate overlap, and a quarter
+of them patterns, with random rows and patterns. It also writes PATTERN while
+a blit is busy, and reads it back. A second master reads continuously on the CPU's port throughout, to
 check the blitter leaves it room.
 
 `sim/tb_cache.v` has a master writing behind the cache: a cached line, the

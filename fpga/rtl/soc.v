@@ -448,7 +448,7 @@ module soc #(
 
         blitter u_blitter (
             .clk(clk), .rst_n(rst_n),
-            .reg_addr(addr[4:0]), .wdata(wdata), .rdata(blt_q),
+            .reg_addr(addr[5:0]), .wdata(wdata), .rdata(blt_q),
             .cs(stb & sel_blt), .we(we),
             .m_req(bl_req), .m_we(bl_we), .m_addr(bl_addr),
             .m_wdata(bl_wdata), .m_wmask(bl_wmask),

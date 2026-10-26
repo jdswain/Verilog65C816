@@ -23,7 +23,7 @@ module tb_blitter;
     reg clk = 0; always #19.84 clk = ~clk;
     reg rst_n = 0;
 
-    reg  [4:0] reg_addr = 0;
+    reg  [5:0] reg_addr = 0;
     reg  [7:0] wdata = 0;
     wire [7:0] rdata;
     reg        cs = 0, we = 0;
@@ -94,17 +94,17 @@ module tb_blitter;
     end
 
     //------------------------------------------------------------------
-    task wr(input [4:0] a, input [7:0] d);
+    task wr(input [5:0] a, input [7:0] d);
         begin
             @(negedge clk); reg_addr = a; wdata = d; we = 1; cs = 1;
             @(negedge clk); cs = 0; we = 0;
         end
     endtask
-    task wr16(input [4:0] a, input [15:0] d);
-        begin wr(a, d[7:0]); wr(a + 5'd1, d[15:8]); end
+    task wr16(input [5:0] a, input [15:0] d);
+        begin wr(a, d[7:0]); wr(a + 6'd1, d[15:8]); end
     endtask
-    task wr24(input [4:0] a, input [23:0] d);
-        begin wr(a, d[7:0]); wr(a + 5'd1, d[15:8]); wr(a + 5'd2, d[23:16]); end
+    task wr24(input [5:0] a, input [23:0] d);
+        begin wr(a, d[7:0]); wr(a + 6'd1, d[15:8]); wr(a + 6'd2, d[23:16]); end
     endtask
 
     //------------------------------------------------------------------
@@ -112,6 +112,7 @@ module tb_blitter;
     //------------------------------------------------------------------
     reg [3:0] refp [0:PIXELS-1];
     reg [3:0] line [0:1023];
+    reg [3:0] pat  [0:63];            // the pattern, pixel 8r + c
 
     function [3:0] rop4(input [3:0] op, input [3:0] s, input [3:0] d);
         integer b;
@@ -121,8 +122,8 @@ module tb_blitter;
         end
     endfunction
 
-    integer errors = 0, tests = 0;
-    integer src, dst, sst, dst_st, w, h, op, fill, key, fmode, tmode;
+    integer errors = 0, tests = 0, seed;
+    integer src, dst, sst, dst_st, w, h, op, fill, key, fmode, tmode, pmode, paty;
     integer x, y, n, i, a, lo, hi, tries, ok, t_start, t_cyc, cyc = 0;
     always @(posedge clk) cyc = cyc + 1;
     reg [3:0] s4, d4;
@@ -132,7 +133,8 @@ module tb_blitter;
         begin
             for (y = 0; y < h; y = y + 1) begin
                 for (x = 0; x < w; x = x + 1)
-                    line[x] = fmode ? fill[3:0] : refp[src + y*sst + x];
+                    line[x] = pmode ? pat[((paty + y) & 7)*8 + ((dst + y*dst_st + x) & 7)]
+                            : fmode ? fill[3:0] : refp[src + y*sst + x];
                 for (x = 0; x < w; x = x + 1) begin
                     s4 = line[x];
                     d4 = refp[dst + y*dst_st + x];
@@ -153,12 +155,15 @@ module tb_blitter;
             wr16(5'h0E, h[15:0]);
             wr(5'h10, op[7:0]);
             wr(5'h11, {key[3:0], fill[3:0]});
+            wr(6'h13, paty[7:0]);
             t_start = cyc;
-            wr(5'h12, {5'd0, tmode[0], fmode[0], 1'b1});
+            wr(5'h12, {4'd0, pmode[0], tmode[0], fmode[0], 1'b1});
             @(posedge clk); #1;
             if (!busy) begin
                 $display("FAIL: not busy after start"); errors = errors + 1;
             end
+            // ignored while busy
+            wr(6'h20, ~{pat[1], pat[0]});
             while (busy) @(posedge clk);
             t_cyc = cyc - t_start;
         end
@@ -172,9 +177,9 @@ module tb_blitter;
                 word = mem.mem[n >> 3];
                 if (word[(n & 7)*4 +: 4] !== refp[n]) begin
                     if (bad < 4)
-                        $display("FAIL %0s: pixel %0d = %x, want %x  (src=%0d dst=%0d w=%0d h=%0d sst=%0d dst_st=%0d op=%0d fill=%0d trans=%0d)",
+                        $display("FAIL %0s: pixel %0d = %x, want %x  (src=%0d dst=%0d w=%0d h=%0d sst=%0d dst_st=%0d op=%0d fill=%0d trans=%0d pat=%0d paty=%0d)",
                                  what, n, word[(n & 7)*4 +: 4], refp[n],
-                                 src, dst, w, h, sst, dst_st, op, fmode, tmode);
+                                 src, dst, w, h, sst, dst_st, op, fmode, tmode, pmode, paty);
                     bad = bad + 1;
                 end
             end
@@ -199,7 +204,22 @@ module tb_blitter;
         end
     endtask
 
-    integer slo, shi, dlo, dhi, seed;
+    // A new pattern, random, written to the registers and read back.
+    task new_pattern;
+        integer r;
+        begin
+            for (r = 0; r < 64; r = r + 1) pat[r] = $random(seed);
+            for (r = 0; r < 32; r = r + 1) wr(6'h20 + r[5:0], {pat[2*r + 1], pat[2*r]});
+            for (r = 0; r < 32; r = r + 1) begin
+                @(negedge clk); reg_addr = 6'h20 + r[5:0]; #1;
+                if (rdata !== {pat[2*r + 1], pat[2*r]}) begin
+                    $display("FAIL: pattern byte %0d reads %x", r, rdata); errors = errors + 1;
+                end
+            end
+        end
+    endtask
+
+    integer slo, shi, dlo, dhi;
     localparam integer LIMIT = PIXELS - 2048 - 1;    // keep clear of the reader
 
     initial begin
@@ -217,7 +237,7 @@ module tb_blitter;
         // ---- directed: the cases worth naming ----
         // A plain aligned copy.
         src = 1024; dst = 4096; sst = 640; dst_st = 640; w = 64; h = 3;
-        op = 3; fill = 0; key = 0; fmode = 0; tmode = 0;
+        op = 3; fill = 0; key = 0; fmode = 0; tmode = 0; pmode = 0; paty = 0;
         model; run_blit; check("aligned copy");
 
         // One pixel, mid-word.
@@ -248,6 +268,27 @@ module tb_blitter;
         model; run_blit; check("xor fill");
         src = 1024; dst = 70010; sst = 640; w = 300; h = 2; fmode = 0; op = 3; tmode = 1; key = 5;
         model; run_blit; check("transparent");
+
+        // Patterns: odd edges at both ends, every row start, the four modes
+        // QuickDraw uses (copy, OR, XOR, BIC) and fill set as well (pattern
+        // wins). Stride 640, so the column is x mod 8 of the 640-wide screen.
+        new_pattern;
+        src = 0; sst = 0; dst_st = 640; tmode = 0; fmode = 0; pmode = 1;
+        dst = 80003; w = 77; h = 11; op = 3; paty = 5;
+        model; run_blit; check("pattern copy");
+        dst = 80000 + 12*640 + 1; w = 6; h = 9; op = 7; paty = 0;
+        model; run_blit; check("pattern or, within a word");
+        dst = 80000 + 24*640 + 7; w = 300; h = 8; op = 6; paty = 3;
+        model; run_blit; check("pattern xor");
+        dst = 80000 + 34*640 + 2; w = 1; h = 10; op = 4; paty = 7; fmode = 1;
+        model; run_blit; check("pattern bic, fill too");
+        dst = 80000 + 46*640 + 13; w = 99; h = 3; op = 3; fmode = 0; tmode = 1; key = pat[13];
+        model; run_blit; check("pattern transparent");
+        @(negedge clk); reg_addr = 6'h12; #1;
+        if (rdata !== 8'h0C) begin $display("FAIL: CONTROL reads %x", rdata); errors = errors + 1; end
+        reg_addr = 6'h13; #1;
+        if (rdata !== 8'h07) begin $display("FAIL: PAT_Y reads %x", rdata); errors = errors + 1; end
+        pmode = 0; tmode = 0;
 
         // Nothing to do.
         w = 0; h = 3; tmode = 0;
@@ -280,6 +321,9 @@ module tb_blitter;
             key   = {$random(seed)} % 16;
             fmode = ({$random(seed)} % 4) == 0;
             tmode = ({$random(seed)} % 3) == 0;
+            pmode = ({$random(seed)} % 4) == 0;
+            paty  = {$random(seed)} % 8;
+            if (pmode && ({$random(seed)} % 4) == 0) new_pattern;
             // Destination lines that overlap each other, or source lines that
             // a previous line's writes reach, are legal and the model handles
             // them in the same line order the hardware uses.
