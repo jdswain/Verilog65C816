@@ -18,11 +18,11 @@ IO_PORT "led" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
 // External peripheral bus (external_bus.v). 20 pins, scraped together from
 // three places on the board:
 //
-//   ext_d[7:0]  -- LCD connector pins, also on the edge headers. Two have
-//                  parts on them (Sipeed schematic rev 3923): pin 25 goes to
-//                  HDMI CEC through 100R, so a connected monitor sits on
-//                  ext_d[0]; pin 49 is the LCD backlight boost enable.
-//                  docs/Hardware.md moves ext_d[0] to pin 31.
+//   ext_d[7:0]  -- LCD connector pins, also on the edge headers. ext_d[0]
+//                  is on pin 31, not 25: pin 25 goes to HDMI CEC through
+//                  100R (Sipeed schematic rev 3923), so a connected monitor
+//                  would sit on it. Pin 49 (ext_d[6]) is the LCD backlight
+//                  boost enable.
 //   ext_a[3:0]  -- the freed LED pins.
 //   selects     -- 71-74, headers only (HSPI labels, but not wired to the
 //                  BL616).
@@ -35,7 +35,7 @@ IO_PORT "led" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
 // ext_irq_n is pulled up internally so an empty connector reads "no
 // interrupt" rather than floating into a permanent IRQ.
 //----------------------------------------------------------------------
-IO_LOC  "ext_d[0]" 25;
+IO_LOC  "ext_d[0]" 31;
 IO_LOC  "ext_d[1]" 29;
 IO_LOC  "ext_d[2]" 30;
 IO_LOC  "ext_d[3]" 41;

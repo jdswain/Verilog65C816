@@ -550,7 +550,7 @@ well as the UART.
 
 | Pin | Signal | Source | Was | Why |
 |---|---|---|---|---|
-| 31 | `ext_d[0]` | Sch, Proposed | unused | It moves here from pin 25. |
+| 31 | `ext_d[0]` | Sch, Built | unused | It moved here from pin 25. |
 | 25 | **unused** | Sch | `ext_d[0]` | It goes to HDMI CEC through 100R, with a 27k pull-up. With a monitor connected, the monitor sits on data bit 0. |
 | 49 | `ext_d[6]` | Sch | unchanged | This is the LCD backlight boost enable. Whenever the bit is high the boost converter runs with no load. **Check:** the converter tolerates an open load, or move this bit too. |
 | 71, 72, 73 | `ext_sel[2:0]`, the select code | Sch, Built | `ext_sel_n[2:0]` | Header only. They carry HSPI labels but don't reach the BL616. |
@@ -558,7 +558,7 @@ well as the UART.
 | 79 | `dma_drq[0]`, SCSI | Sch, Built | unused | The WS2812 LED, with a 5.1k pull-down. The pull-down suits an active-high input. The LED may flicker during DMA. |
 | 80 | `dma_drq[1]`, floppy | Sch, Built | unused | SD D2, with a 10k pull-up. Free, because the SD card isn't used. |
 | 85 | `dma_tc` | Sch, Built | unused | SD D1, with a 10k pull-up. Free for the same reason. |
-| 51, 54, 55, 56 | sound | Sch, Proposed | unused | The onboard I2S amplifier. See [Sound](#sound). |
+| 51, 54, 55, 56 | sound | Sch, Built | unused | The onboard I2S amplifier. See [Sound](#sound). |
 
 ### Spare or not usable
 
@@ -572,6 +572,48 @@ well as the UART.
 
 That accounts for 23 external-bus and DMA pins, up from 20, and four for sound.
 Six spare pins remain: four through the microSD slot and two on the DDC lines.
+
+### Edge headers
+
+The carrier reaches the FPGA through the Tang Nano's two 1x20 headers, J5 and
+J6, 2.54 mm pitch, the rows 20.32 mm apart. Seen from above with USB-C at the
+top, J5 is the right-hand row and J6 the left, and pin 1 of each is at the
+USB-C end, so J5-1 faces J6-1. The board is 54.04 x 22.55 mm (Sipeed
+dimension drawing, revision 3921).
+
+| J5 | Pin | Signal | | J6 | Pin | Signal |
+|---|---|---|---|---|---|---|
+| 1 | | +5V | | 1 | 73 | `ext_sel[2]` |
+| 2 | | GND | | 2 | 74 | `ext_sel_en_n` |
+| 3 | 76 | `ext_rd_n` | | 3 | 75 | `ext_wr_n` |
+| 4 | 80 | `dma_drq[1]` | | 4 | 85 | `dma_tc` |
+| 5 | 42 | `ext_d[4]` | | 5 | 77 | `ext_d[7]` |
+| 6 | 41 | `ext_d[3]` | | 6 | 15 | `ext_a[0]` |
+| 7 | 56 | `i2s_bclk` | | 7 | 16 | `ext_a[1]` |
+| 8 | 54 | `i2s_din` | | 8 | 27 | `adb_drive` |
+| 9 | 51 | `amp_en` | | 9 | 28 | `adb_sense` |
+| 10 | 48 | `ext_d[5]` | | 10 | 25 | unused (HDMI CEC) |
+| 11 | 55 | `i2s_lrck` | | 11 | 26 | not usable (HDMI hot-plug) |
+| 12 | 49 | `ext_d[6]` | | 12 | 29 | `ext_d[1]` |
+| 13 | 86 | `ext_res_n` | | 13 | 30 | `ext_d[2]` |
+| 14 | 79 | `dma_drq[0]` | | 14 | 31 | `ext_d[0]` |
+| 15 | | GND | | 15 | 17 | `ext_a[2]` |
+| 16 | | +3V3 | | 16 | 20 | `led` |
+| 17 | 72 | `ext_sel[1]` | | 17 | 19 | `ext_irq_n` |
+| 18 | 71 | `ext_sel[0]` | | 18 | 18 | `ext_a[3]` |
+| 19 | 53 | spare (HDMI DDC) | | 19 | | +3V3 |
+| 20 | 52 | spare (HDMI DDC) | | 20 | | GND |
+
+* The clock (4), S1 (87), the BL616 UART (69, 70) and HDMI (33-40) stay on
+  the Tang Nano and are not on the headers.
+* The pin assignments are from the schematic (revision 3923). The
+  orientation is from two published carrier boards' footprints (WonderTANG,
+  VDAC4), not from Sipeed. **Check** on the board that the pin by the USB-C
+  end of the right-hand row is +5V before the carrier goes to fabrication.
+* WonderTANG's symbol has pin 78 at J5-3, where the schematic has 76.
+  **Check** J5-3 against pin 76 on the board.
+* KiCad: the symbol `Tang_Nano_20K` in 65Parts numbers J5 as 1-20 and J6 as
+  21-40, and the footprint `My_Parts:Tang_Nano_20K` matches it.
 
 ## PCB requirements
 

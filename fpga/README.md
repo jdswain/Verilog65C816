@@ -481,7 +481,7 @@ free bank big enough. The notes are from Sipeed's schematic (revision 3923):
 
 | Signal | Pins | What else is on them |
 |---|---|---|
-| `ext_d[7:0]` | 25, 29, 30, 41, 42, 48, 49, 77 | the LCD connector and the edge headers; see below for 25 and 49 |
+| `ext_d[7:0]` | 31, 29, 30, 41, 42, 48, 49, 77 | the LCD connector and the edge headers; see below for 49 |
 | `ext_a[3:0]` | 15, 16, 17, 18 | four of the six LEDs, and the LCD connector's touch pins |
 | `ext_sel[2:0]`, `ext_sel_en_n` | 71, 72, 73; 74 | headers only (they carry HSPI labels but don't reach the BL616) |
 | `ext_wr_n` | 75 | the BL616's SPI link (MISO) |
@@ -493,9 +493,9 @@ free bank big enough. The notes are from Sipeed's schematic (revision 3923):
 
 Things to watch:
 
-* **Pin 25 (`ext_d[0]`) is HDMI CEC**, through 100R with a 27k pull-up. With a
-  monitor connected, the monitor sits on data bit 0. `docs/Hardware.md`
-  moves this bit to pin 31.
+* **`ext_d[0]` is on pin 31, not 25.** Pin 25 is HDMI CEC, through 100R with
+  a 27k pull-up, so with a monitor connected the monitor would sit on data
+  bit 0. Pin 25 is left unused.
 * **Pin 49 (`ext_d[6]`) is the LCD backlight boost enable.** The boost
   converter runs with no load whenever the bit is high.
 * **Pins 75, 76 and 86 go to the BL616**, which also has pin 13. They are
