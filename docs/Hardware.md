@@ -92,14 +92,40 @@ floppy drives. No 5V signal may reach an FPGA pin directly.
 
 | Signal group | Direction | Part | Notes |
 |---|---|---|---|
-| `ext_d[7:0]` | both ways | 74LVC245 at 3.3V | Its inputs are 5V tolerant, and its 3.3V output meets the TTL input high level. `DIR` comes from `RD#`; `/OE` comes from the select enable. Neither needs a pin. |
-| `ext_a`, select code and enable, `RD#`, `WR#`, `RES#`, `TC` | FPGA to carrier | 74HCT541 and 74HCT138 at 5V | HCT inputs accept 3.3V. The buffer also protects the FPGA pins. |
-| `DRQ` inputs | carrier to FPGA | 74LVC125 or 74LVC244 at 3.3V | Inputs are 5V tolerant. |
+| `ext_d[7:0]` | both ways | 74LVC245A at 3.3V (SN74LVC245AN is DIP-20) | Its inputs are 5V tolerant, and its 3.3V output meets the 5V chips' input high level (2.0-2.2V). `DIR` comes from `RD#` and `/OE` from the select enable, both on the FPGA side. Neither needs a pin. |
+| `ext_a[3:0]`, `RD#`, `WR#`, `RES#`, `TC` | FPGA to carrier | 74HCT541 at 5V (74AHCT541 for less delay) | HCT inputs accept 3.3V, and the outputs swing a full 5V. The eight signals fill it. It also protects the FPGA pins. |
+| Select code and enable | FPGA to carrier | 74HCT138 at 5V | It shifts and decodes in one part. |
+| `DRQ0`, `DRQ1` | carrier to FPGA | 74LVC125A at 3.3V | Inputs are 5V tolerant. |
+| `adb_sense` | carrier to FPGA | A spare 74LVC125A gate, or a 74LVC1G17 | The 1G17's Schmitt input suits the slow edges of a pulled-up ADB cable. See [ADB](#adb). |
+| `adb_drive` | FPGA to bus | 2N3904 | See [ADB](#adb). |
 | `ext_irq_n` | carrier to FPGA | Open-drain node pulled up to 3.3V | See [Interrupts](#interrupts). It needs no shifter. |
-| ADB | both ways | Transistor and level shifter | See [ADB](#adb). |
 
-**Strobes and selects need pull-ups on the 5V side.** The cards must stay idle
-while the FPGA is unconfigured and its pins float.
+Nothing else crosses between 3.3V and 5V:
+* The I2S lines to a PCM5102A are 3.3V at both ends.
+* The W5100S runs at 3.3V on the 5V side of the bus. **Check** that its I/O
+  is 5V tolerant.
+* RS-232 for channel A, if chosen, needs line drivers (a MAX232 or similar).
+  That is not a logic-level shift.
+* The floppy cable needs no drivers: with `INVERT` tied to ground the
+  82077AA's own 40 mA outputs and receivers drive it. The drive's
+  open-collector outputs need pull-ups (typically 1k).
+
+**Hold the carrier idle while the FPGA is unconfigured.** The FPGA pins float
+until it is configured, and the '541 and '138 drive their outputs from
+whatever they see, so a pull-up on the 5V side would do nothing. The
+resistors go on the FPGA side, at the buffer and decoder inputs:
+* Pull-ups to 3.3V on `RD#`, `WR#` and the select enable. The enable also
+  turns the 74LVC245 off.
+* A pull-down on `RES#`, so the cards sit in reset until the FPGA runs.
+* A pull-down on `TC`.
+
+Never pull an FPGA-side net to 5V.
+
+**Check: a short bus fight at the end of a read.** `RD#` rises one system
+clock (40 ns) before the select enable is released. For that time `DIR` has
+already turned the 74LVC245 towards the cards while the card's outputs are
+still turning off. It is brief and usually harmless. Gating `/OE` so the
+buffer is enabled only while a strobe is low would remove it.
 
 ## External bus
 
@@ -207,7 +233,7 @@ that saves a part. With seven selects needed the trade goes the other way.
 | Chip | Reset input | Wiring |
 |---|---|---|
 | Z85C80 SCSI | `/RESET`, active low | from `RES#` through the HCT buffer |
-| 82077AA | `RESET`, active high (**Check**) | `RES#` through one inverter gate |
+| 82077AA | `RESET`, active high | `RES#` through a 74HCT04 gate |
 | Z85C80 SCC | none | `/RD` and `/WR` asserted together |
 | W5100S | `/RESET`, active low | from `RES#` |
 
@@ -240,10 +266,10 @@ That is **three new pins**.
 
 `TC` is shared between the two chips:
 * It goes to the 82077AA `TC` (active high) directly.
-* It goes to the 53C80 `/EOP` through an inverter.
+* It goes to the 53C80 `/EOP` through a 74HCT04 gate.
 * Each chip only acts on its terminal-count input while its own `/DACK` is
-  asserted, so one pin serves both. **Check:** this is true of the 82077AA
-  `TC`.
+  asserted, so one pin serves both. The 82077AA datasheet says so of its
+  `TC`, which is active high in AT mode.
 
 The 53C80 can also end a transfer without `/EOP`, by clearing its DMA Mode
 bit. The 82077AA needs `TC`.
@@ -292,12 +318,18 @@ carrier.
 |---|---|---|
 | Z85C80 SCC `/INT` | open-drain, active low | directly |
 | Z85C80 SCSI `IRQ` | active high | through a 74HC05 open-drain inverter |
-| 82077AA `INT` | active high | through a 74HC05 open-drain inverter |
-| W5100S `/INT` | active low, push-pull (**Check**) | through a 74HC05 after an inverter, or a diode |
+| 82077AA `INT` | active high | through a 74HC05 open-drain inverter, with a pull-down at its input |
+| W5100S `/INT` | active low, push-pull (**Check**) | through a BAT54 Schottky (anode on the node), or a 74LVC1G07 |
 
 * The node has its own pull-up to 3.3V, so it goes straight to the existing
   pin 19 (`ext_irq_n`) with no level shifter.
 * The 74HC05 runs at 5V, but its open-drain outputs only ever pull down.
+* The 82077AA tristates `INT`, as it does `DRQ`, while its DMA gate is off in
+  AT mode. The pull-down keeps the 74HC05 input from floating.
+* An inverting '05 gate can't take the W5100S's active-low push-pull output,
+  hence the diode or the non-inverting open-drain buffer.
+* There is no priority encoder. A 74HC148 would need three more input pins,
+  and none are free. Software reads each chip, as below.
 
 Software finds the source by reading each chip:
 * **SCC:** RR3 on channel A.
@@ -440,8 +472,9 @@ milliseconds between transactions, and the controller enforces this (see
   * FPGA high means bus low.
   * The pin has a pull-down, so the bus stays released while the FPGA is
     unconfigured.
-* **`adb_sense`, pin 28:** a level shifter from the 5V bus. The pin has no
-  pull-up, because one would fight the bus pull-up.
+* **`adb_sense`, pin 28:** a level shifter from the 5V bus: a 74LVC1G17,
+  whose Schmitt input suits the slow edges, or the spare 74LVC125A gate. The
+  pin has no pull-up, because one would fight the bus pull-up.
 * **Bus pull-up R3:** to +5V. A few kilohms is typical; **Check** the value.
 * **Connector:** 4-pin mini-DIN.
   * Pin 1 is data.
@@ -641,30 +674,39 @@ to the section that explains it.
 
 ### Level shifting and bus buffering
 
-- [ ] A 74LVC245 on `ext_d[7:0]`. `DIR` comes from `RD#` and `/OE` from the
-      select enable.
-- [ ] A 74HCT541 (or similar) on the FPGA outputs: `ext_a[3:0]`, `RD#`,
-      `WR#`, `RES#` and `TC`.
-- [ ] A 74LVC125 or 74LVC244 on the inputs to the FPGA: `DRQ0` and `DRQ1`.
-- [ ] No 5V signal reaches an FPGA pin anywhere.
+- [ ] A 74LVC245A at 3.3V on `ext_d[7:0]`. `DIR` comes from `RD#` and `/OE`
+      from the select enable, both on the FPGA side.
+- [ ] A 74HCT541 (or 74AHCT541) at 5V on the FPGA outputs: `ext_a[3:0]`,
+      `RD#`, `WR#`, `RES#` and `TC`.
+- [ ] A 74LVC125A at 3.3V on the inputs to the FPGA: `DRQ0`, `DRQ1`, and
+      `adb_sense` if it doesn't get a 74LVC1G17.
+- [ ] A 74HCT04 for the two inverters: `TC` to the 53C80 `/EOP`, and `RES#`
+      to the 82077AA `RESET`.
+- [ ] On the FPGA side of the buffers: pull-ups to 3.3V on `RD#`, `WR#` and
+      the select enable, and pull-downs on `RES#` and `TC`
+      ([Voltage levels](#voltage-levels)).
+- [ ] No 5V signal reaches an FPGA pin anywhere, and no FPGA-side net is
+      pulled to 5V.
 
 ### Select decoding
 
 - [ ] A 74HCT138: the select code on A-C, the select enable on `/G2A`, and
       `G1` tied high ([Select decoding](#select-decoding-proposed-change)).
-- [ ] Pull-ups on the 5V side for every select, `RD#` and `WR#`.
+- [ ] The select enable's pull-up to 3.3V (above) keeps the decoder off
+      while the FPGA is unconfigured.
 
 ### Interrupts and DMA
 
 - [ ] A 74HC05 for the interrupt wire-OR: open-drain inverters for the
-      SCSI `IRQ` and the floppy `INT`, and whatever the W5100S `/INT` needs
-      ([Interrupts](#interrupts)).
+      SCSI `IRQ` and the floppy `INT` ([Interrupts](#interrupts)).
+- [ ] A pull-down on the 82077AA `INT`, at the 74HC05 input.
+- [ ] A BAT54 Schottky or a 74LVC1G07 for the W5100S `/INT`.
 - [ ] A pull-up to 3.3V on the interrupt node, which goes to pin 19.
 - [ ] `DRQ0` (53C80) and `DRQ1` (82077AA) to pins 79 and 80, through the
       LVC buffer.
 - [ ] Pull-downs on both `DRQ` inputs to the buffer, on the 5V side: the
       82077AA tristates `DRQ` while its DMA gate is off ([DMA.md](DMA.md)).
-- [ ] `TC` from pin 85 to the 82077AA `TC`, and through an inverter to the
+- [ ] `TC` from pin 85 to the 82077AA `TC`, and through the 74HCT04 to the
       53C80 `/EOP`.
 - [ ] Decoder outputs 1 and 4 to the 82077AA and 53C80 `/DACK`.
 
@@ -695,12 +737,14 @@ to the section that explains it.
 ### Floppy
 
 - [ ] An 82077AA, in a 68-pin PLCC socket.
-- [ ] A 24 MHz crystal or oscillator (**Check**).
-- [ ] `RESET` from `RES#` through an inverter (**Check** the polarity).
+- [ ] A 24 MHz fundamental-mode parallel-resonant crystal, or a MOS-level
+      clock on X1 with X2 left open.
+- [ ] `RESET` (active high) from `RES#` through the 74HCT04.
 - [ ] A2-A0 to `ext_a[2:0]`.
 - [ ] A 34-pin drive header for two drives, and drive power connectors.
-- [ ] Whatever the drive interface needs between the 82077AA and the cable
-      (**Check**).
+- [ ] `INVERT` tied to ground, so the 82077AA's own drivers and receivers
+      serve the cable directly; pull-ups (typically 1k) on the drive's
+      open-collector outputs.
 
 ### Ethernet
 
@@ -713,7 +757,7 @@ to the section that explains it.
 
 - [ ] A transistor from pin 27 that pulls the ADB line low when the pin is
       high ([ADB](#adb)).
-- [ ] A level shifter from the ADB line to pin 28.
+- [ ] A 74LVC1G17, or the spare 74LVC125A gate, from the ADB line to pin 28.
 - [ ] The bus pull-up, R3, to +5V (**Check** the value).
 - [ ] A 4-pin mini-DIN: data, power key, +5V, ground.
 - [ ] The power key line brought to somewhere it can be read, if keyboard
@@ -745,8 +789,7 @@ to the section that explains it.
    85 and 86, and turn **Sch** into **Board** in the tables.
 2. Confirm the **Check** items against the datasheets:
    * the Z85C80 8 MHz grade's bus timing
-   * the 82077AA's reset polarity, its crystal, whether `TC` is qualified by
-     `/DACK`, the DOR bit 3 gating, its drive outputs, and its bus timing
+   * the 82077AA's DOR bit 3 gating and its bus timing
    * the W5100S's bus timing, its `/INT` output, its 5V tolerance and its
      crystal
 3. Decide the **Open** items: serial line drivers, the console's home once
@@ -759,4 +802,4 @@ to the section that explains it.
    * ~~the SCC reset on `RES#`~~ (done)
    * ~~the DMA engine and its multiplexer on the memory-master port~~ (done)
    * ~~the interrupt register~~ (done, with the tick timer)
-   * the `.cst` pin moves
+   * ~~the `.cst` pin moves~~ (done)
