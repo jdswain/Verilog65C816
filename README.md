@@ -16,6 +16,7 @@ than the original part.
 | `tb_harte.v`   | Testbench that runs the SingleStepTests (TomHarte) vectors |
 | `harte_run.py` | Downloads, converts, runs and aggregates the TomHarte vectors |
 | `banked.s`     | Checks of the banked direct page and stack (`make banked`) |
+| `tb_irqwait.v`, `irqwait.s` | IRQs taken while the bus waits, on a cache-like bus (`make irqwait`) |
 | `Makefile`     | `make run` builds with Icarus Verilog and runs the test suite |
 
 ## Running the tests
@@ -24,6 +25,7 @@ than the original part.
 make run            # expects iverilog/vvp and python3 on PATH
 vvp sim +trace=200  # optional: print the first 200 bus cycles
 make banked         # the banked direct page and stack: PASS  (642 cycles)
+make irqwait        # IRQs under wait states: the same checksum, the bus held (45 s)
 ```
 
 Expected output: `PASS  (1410 cycles)`. The 70 checks cover all addressing

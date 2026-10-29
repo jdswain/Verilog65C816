@@ -29,3 +29,5 @@ impl/
 # RAM programs: keep the sources
 /fpga/apps/*.hex
 /fpga/apps/*.lst
+/irqwait.mem
+/sim_irqwait

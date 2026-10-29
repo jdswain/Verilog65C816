@@ -152,8 +152,11 @@ module cpu_65c816 (
 
     localparam [1:0] PP_FETCH=2'd0, PP_VEC=2'd1, PP_PTR=2'd2;
 
-    // interrupt synchronizers / NMI edge detect
-    reg  irq1, irq2, nmi1, nmi2, nmi_pend;
+    // interrupt synchronizers / NMI edge detect. irq2 and nmi_pend change
+    // only as a bus cycle ends (step): S_FETCH drops vld for an interrupt,
+    // and an opcode fetch that is waiting for rdy must not be abandoned --
+    // the memory may finish it anyway and its rdy would end the next access.
+    reg  irq1, irq2, nmi1, nmi2, nmi_pend, nmi_seen;
     reg  ab;                      // synchronized ABORT input
     wire intr = nmi_pend | (~irq2 & ~fI);
 
@@ -851,9 +854,11 @@ module cpu_65c816 (
             sfD<=1'b0; sfI<=1'b1; sfZ<=1'b0; sfC<=1'b0; sfE<=1'b1;
         end else begin
             // interrupt input synchronizers / NMI edge detect
-            irq1 <= irq_n; irq2 <= irq1;
+            irq1 <= irq_n;
+            if (step) irq2 <= irq1;
             nmi1 <= nmi_n; nmi2 <= nmi1;
-            if (nmi2 & ~nmi1) nmi_pend <= 1'b1;
+            if (step & nmi_seen) begin nmi_pend <= 1'b1; nmi_seen <= 1'b0; end
+            if (nmi2 & ~nmi1) nmi_seen <= 1'b1;
             // abort synchronizer
             ab <= abort_n;
 
