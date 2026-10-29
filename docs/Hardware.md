@@ -25,7 +25,7 @@ Each item is marked:
 | CPU, cache, 8 MB SDRAM, boot ROM | 65C816 core, GW2AR-18 | FPGA | Built |
 | Video, 640x480 HDMI, text and 16-colour graphics | | FPGA | Built |
 | Blitter | | FPGA | Built |
-| Console serial | Z85C30 SCC channel A | Emulated in the FPGA on the BL616 USB bridge; later the real chip | Emulation built; it replaced the ACIA |
+| Console serial | Z85C30 SCC channel A | Emulated in the FPGA on the BL616 USB bridge; the real chip's RS-232 port optional | Emulation built; it replaced the ACIA |
 | Keyboard and mouse | ADB host | FPGA, plus a transistor and level shifter | Working on a breadboard |
 | Two serial ports (one internal, one external) | Z85C80 SCC half | Carrier | Proposed |
 | SCSI (one internal, one external connector) | Z85C80 SCSI half (53C80) | Carrier | Proposed |
@@ -104,8 +104,8 @@ Nothing else crosses between 3.3V and 5V:
 * The I2S lines to a PCM5102A are 3.3V at both ends.
 * The W5100S runs at 3.3V on the 5V side of the bus. **Check** that its I/O
   is 5V tolerant.
-* RS-232 for channel A, if chosen, needs line drivers (a MAX232 or similar).
-  That is not a logic-level shift.
+* RS-232 on channel A needs line drivers (a MAX3232). That is not a
+  logic-level shift.
 * The floppy cable needs no drivers: with `INVERT` tied to ground the
   82077AA's own 40 mA outputs and receivers drive it. The drive's
   open-collector outputs need pull-ups (typically 1k).
@@ -370,20 +370,41 @@ timer is on `IRQ`, not `NMI`, so a tick can't interrupt an IRQ handler.
 | 82077AA | 24 MHz crystal or oscillator (**Check**) | |
 | W5100S | 25 MHz crystal (**Check**) | |
 
-**Proposed:** one 7.3728 MHz oscillator drives `PCLK` and both `/RTxC` pins.
+**Decided:** one 7.3728 MHz oscillator drives `PCLK` and both `/RTxC` pins.
 It is under the 8 MHz limit, and it divides exactly to the standard baud
 rates: 115200 is a time constant of 0 at x16.
 
+**No AppleTalk.** LocalTalk's DPLL clock is 16 times 230.4 kbit/s, which is
+3.6864 MHz on `/RTxC`, and 7.3728 MHz can't give it: directly it is twice
+that, and through the baud-rate generator (at most a quarter) it is half.
+Networking will be Ethernet (see [Ethernet](#ethernet)), so the IIgs
+crystal is not needed.
+
+With an oscillator on `/RTxCA` there is no crystal, so WR11 bit 7 (RTxC
+Xtal/No Xtal) stays 0, as OS16's serial driver writes it. `/SYNCA` is then an
+input that only sets the Sync/Hunt bit in RR0, so **pull `/SYNCA` up** (10k)
+rather than leave it floating. `SYNCB` is grounded inside the Z85C80.
+
 ## Serial
 
-* **Console:** SCC channel A. Until the carrier exists it is emulated in the
-  FPGA on the BL616 USB bridge, at 115200 8N1. Once the carrier exists, which
-  of the BL616 and the carrier's channel A owns the console is **Open**.
-* **SCC channel A, external:** the line drivers are **Open**:
-  * RS-232: a MAX232 or MAX3232
-  * RS-422, as on the Macintosh: a 26LS31 and 26LS32
-* **SCC channel B, internal:** a header at TTL level, or the same drivers.
-  **Open.**
+The SCC is kept because it comes in the Z85C80 with the SCSI controller,
+and it needs no FPGA pins of its own: it is on the shared bus, with a select
+code and the wired-OR interrupt. Its uses are small: a serial console that
+does not depend on the BL616, slow data transfer (115200 baud is about
+11 KB/s; Ethernet does this better), and perhaps a vintage serial printer.
+So its parts are **optional on the PCB**, apart from the oscillator, which
+the chip needs to run at all.
+
+* **Console:** the BL616 USB bridge, through the FPGA's emulation of channel
+  A, at 115200 8N1. The real channel A is the console when a real serial
+  port is wanted.
+* **SCC channel A, external:** RS-232 through a MAX3232, to a connector.
+  Both are optional. RS-422 (26LS31 and 26LS32, as on the Macintosh) is not
+  needed without AppleTalk.
+* **SCC channel B, internal:** an optional header at TTL level.
+* **Unfitted drivers:** pull up `RxDA`, `/CTSA` and `/DCDA` (10k), so that
+  the inputs don't float when the MAX3232 is left off. Channel B's inputs
+  get the same pull-ups at the header.
 
 ## SCSI
 
@@ -715,13 +736,15 @@ to the section that explains it.
 - [ ] A 68-pin PLCC socket.
 - [ ] A 7.3728 MHz oscillator to `PCLK`, `/RTxCA` and `/RTxCB`.
 - [ ] `/INTACK` pulled up.
+- [ ] `/SYNCA` pulled up (10k); no crystal on `/RTxCA` and `/SYNCA`.
 - [ ] Pull-ups on `/W//REQA` and `/W//REQB`, or leave them unconnected.
 - [ ] `/RESET` (SCSI) from `RES#`.
 - [ ] `D//C` to `ext_a[0]`, `A//B` to `ext_a[1]`, SCSI A2-A0 to
       `ext_a[2:0]`.
-- [ ] Channel A: line drivers and the external connector (**Open**: RS-232
-      or RS-422).
-- [ ] Channel B: the internal header, at TTL level or with drivers (**Open**).
+- [ ] Channel A: a MAX3232 and an RS-232 connector, both optional.
+- [ ] Channel B: an optional internal header at TTL level.
+- [ ] 10k pull-ups on `RxDA`, `/CTSA`, `/DCDA`, `RxDB`, `/CTSB` and `/DCDB`,
+      for when the drivers or the header are left off.
 - [ ] The modem lines (`/CTS`, `/DCD`, `/RTS`, `/DTR`) to the connectors, or
       tied inactive.
 
@@ -792,8 +815,7 @@ to the section that explains it.
    * the 82077AA's DOR bit 3 gating and its bus timing
    * the W5100S's bus timing, its `/INT` output, its 5V tolerance and its
      crystal
-3. Decide the **Open** items: serial line drivers, the console's home once
-   the carrier exists, the external SCSI connector, power, SCC DMA, and
+3. Decide the **Open** items: the external SCSI connector, power, SCC DMA, and
    whether to build the Ethernet as proposed.
 4. RTL changes:
    * ~~Intel-only `external_bus.v` at the 8 MHz timing, with the SCC
