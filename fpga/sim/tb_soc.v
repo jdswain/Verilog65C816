@@ -67,6 +67,10 @@ module tb_soc #(
     reg drq1 = 1'b0;
     initial if ($test$plusargs("drq1")) drq1 = 1'b1;
 
+    // The microSD slot (see the card model below)
+    wire sd_clk, sd_mosi, sd_cs_n, sd_card_miso, sd_card_oe;
+    wire sd_miso = sd_card_oe ? sd_card_miso : 1'b1;
+
     soc #(.ROM_HEX(ROM_HEX), .DIVISOR(DIVISOR),
           .MAP(MAP), .ROM_BITS(ROM_BITS), .ROM_BASE(ROM_BASE)) dut (
         .clk(clk), .rst_n(rst_n), .rxd(rxd), .txd(txd), .led(led),
@@ -81,7 +85,18 @@ module tb_soc #(
         .clk_pix(clk_pix), .pix_rst_n(rst_n),
         // No card attached: IRQ must be tied high or it floats into the CPU.
         .ext_d_in(8'hFF), .ext_irq_n(1'b1), .dma_drq({drq1, 1'b0}),
-        .adb_drive(adb_drive), .adb_sense(adb_bus)
+        .adb_drive(adb_drive), .adb_sense(adb_bus),
+        .sd_clk(sd_clk), .sd_mosi(sd_mosi), .sd_cs_n(sd_cs_n), .sd_miso(sd_miso)
+    );
+
+    //------------------------------------------------------------------
+    // The microSD slot: a card when +sd=image.hex names an image (a byte a
+    // line, as `xxd -p -c1` writes it); without one MISO floats high, as the
+    // pin's pull-up holds it.
+    //------------------------------------------------------------------
+    sd_card_model sdcard (
+        .sclk(sd_clk), .mosi(sd_mosi), .cs_n(sd_cs_n),
+        .miso(sd_card_miso), .miso_oe(sd_card_oe)
     );
 
     //------------------------------------------------------------------

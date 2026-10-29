@@ -20,7 +20,8 @@ RTL      := $(ROOT)/cpu_65c816.v $(wildcard rtl/*.v)
 IFLAGS   := -Irtl
 # sid_api_stub.v stands in for the SIDs (rtl/sid/), whose SystemVerilog
 # Icarus cannot parse.
-TB       := sim/tb_soc.v sim/sdram_model.v sim/adb_kbd_model.v sim/sid_api_stub.v
+TB       := sim/tb_soc.v sim/sdram_model.v sim/adb_kbd_model.v sim/sid_api_stub.v \
+            sim/sd_card_model.v
 # Which image gets baked into the bitstream, and run by `make sim`. Override
 # to build a variant:
 #   make bit ROM=rom/memtest.mem

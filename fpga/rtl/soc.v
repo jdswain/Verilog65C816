@@ -24,7 +24,7 @@
 //   $0200-$023F   unclaimed, reads $FF (was the 6551 ACIA)
 //   $0240-$027F   palette: 16 entries x 4 bytes {red, green, blue, -}
 //   $0280-$02BF   keyboard: Apple Desktop Bus host (adb_host.v)
-//   $02C0-$02FF   SD card    (not implemented; reads $FF)
+//   $02C0-$02FF   SD card in SPI mode (sd_spi.v)
 //   $0300-$033F   system control (ROM/RAM soft switch)
 //   $0340-$037F   external bus control (external_bus.v)
 //   $0380-$03BF   video control (graphics/text mode)
@@ -147,7 +147,12 @@ module soc #(
     output wire        i2s_bclk,
     output wire        i2s_lrck,
     output wire        i2s_din,
-    output wire        amp_en
+    output wire        amp_en,
+    // The microSD slot in SPI mode (sd_spi.v)
+    output wire        sd_clk,
+    output wire        sd_mosi,
+    output wire        sd_cs_n,
+    input  wire        sd_miso
 );
     localparam [15:0] ROM_MASK = ~((16'd1 << ROM_BITS) - 16'd1);
     localparam integer MAP_MINIMON = 0;
@@ -254,6 +259,7 @@ module soc #(
     wire io_lo    = sel_io & ~addr[11];
     wire sel_pal  = io_lo & (addr[10:6] == 5'd9);            // $0240-$027F
     wire sel_adb  = io_lo & (addr[10:6] == 5'd10);           // $0280-$02BF
+    wire sel_sd   = io_lo & (addr[10:6] == 5'd11);           // $02C0-$02FF
     wire sel_sys  = io_lo & (addr[10:6] == 5'd12);           // $0300-$033F
     wire sel_extc = io_lo & (addr[10:6] == 5'd13);           // $0340-$037F
     wire sel_vid  = io_lo & (addr[10:6] == 5'd14);           // $0380-$03BF
@@ -293,10 +299,14 @@ module soc #(
     // handshake: SDRAM (variable latency) and the external bus (1-2 us).
     wire slow = sel_sdram | sel_ext;
 
+    // The SD controller can hold the second cycle open (sd_stall) while an
+    // exchange it waits for finishes. sd_stall is a register of its own, so
+    // this adds no decode to the paths into rdy.
+    wire sd_stall;
     reg busy;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) busy <= 1'b0;
-        else        busy <= vld & ~slow & ~rom_fast & ~busy;
+        else        busy <= (vld & ~slow & ~rom_fast & ~busy) | (busy & sd_stall);
     end
 
     wire stb = vld & ~slow & ~rom_fast & ~busy;
@@ -343,7 +353,8 @@ module soc #(
     // (busy is guaranteed 0 during a slow access, so it needs no guard) was
     // measured at 25.6 MHz against this version's 27.4 -- the mapper folds the
     // mux into the same LUT as the select and the flat form does not.
-    assign rdy = sel_sdram ? sdram_ack : sel_ext ? ext_ack : (rom_fast | busy);
+    assign rdy = sel_sdram ? sdram_ack : sel_ext ? ext_ack
+                                         : (rom_fast | (busy & ~sd_stall));
 
     //------------------------------------------------------------------
     // Boot ROM, 16 bits wide.
@@ -571,6 +582,18 @@ module soc #(
     );
 
     //------------------------------------------------------------------
+    // The microSD slot in SPI mode, $02C0 (sd_spi.v)
+    //------------------------------------------------------------------
+    wire [7:0] sd_q, sd_rx;
+
+    sd_spi #(.SYS_HZ(SYS_HZ)) u_sd (
+        .clk(clk), .rst_n(rst_n),
+        .reg_addr(addr[1:0]), .wdata(wdata), .rdata(sd_q), .rx(sd_rx),
+        .cs(stb & sel_sd), .we(we), .stall(sd_stall),
+        .sd_clk(sd_clk), .sd_mosi(sd_mosi), .sd_cs_n(sd_cs_n), .sd_miso(sd_miso)
+    );
+
+    //------------------------------------------------------------------
     // Sound: two SIDs (reDIP SID, rtl/sid/) on the I2S amplifier
     //------------------------------------------------------------------
     wire [7:0] snd_q;
@@ -693,10 +716,14 @@ module soc #(
     // their own read data on the strobe (the R6501 serial port does), so it is not there to
     // be captured until the cycle after.
     //
-    // Anything unclaimed reads $FF: it takes the I/O path, and the palette,
-    // the SD card slot and the empty ranges set none of the flops.
+    // Anything unclaimed reads $FF: it takes the I/O path, and the palette
+    // and the empty ranges set none of the flops.
+    //
+    // The SD card's DATA and NEXT are read from its own register, not
+    // captured on the strobe: an access that waits gets the byte at the end.
     //------------------------------------------------------------------
     reg r_ser, r_adb, r_extc, r_sys, r_vid, r_blt, r_dma, r_irq, r_snd, r_none;
+    reg r_sd, r_sdrx;
 
     always @(posedge clk) if (stb) begin
         rom_r  <= sel_rom;
@@ -710,15 +737,18 @@ module soc #(
         r_dma  <= sel_dma;
         r_irq  <= sel_irq;
         r_snd  <= sel_snd;
+        r_sd   <= sel_sd;
+        r_sdrx <= ~addr[1];
         r_none <= ~(sel_ser | sel_adb | sel_extc | sel_sys | sel_vid | sel_blt
-                    | sel_dma | sel_irq | sel_snd);
+                    | sel_dma | sel_irq | sel_snd | sel_sd);
     end
 
     // The ADB host's, the blitter's, the DMA engine's and $0440's read data
     // are combinational from the address, which put address -> device mux ->
     // rdata -> ALU back on the critical path. Capture them on the strobe.
-    reg [7:0] adb_q_r, blt_q_r, dma_q_r, irq_q_r;
+    reg [7:0] adb_q_r, blt_q_r, dma_q_r, irq_q_r, sd_q_r;
     always @(posedge clk) if (stb) begin
+        sd_q_r  <= sd_q;
         adb_q_r <= adb_q;
         blt_q_r <= blt_q;
         dma_q_r <= dma_q;
@@ -734,6 +764,7 @@ module soc #(
                     | ({8{r_dma}}  & dma_q_r)
                     | ({8{r_irq}}  & irq_q_r)
                     | ({8{r_snd}}  & snd_q)
+                    | ({8{r_sd}}   & (r_sdrx ? sd_rx : sd_q_r))
                     | {8{r_none}};
 
     always @* begin

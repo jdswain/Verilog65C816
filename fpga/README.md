@@ -77,7 +77,7 @@ window for the external bus:
 | `$0200`-`$023F` | unclaimed, reads `$FF` (was the 6551 ACIA, replaced by the SCC) |
 | `$0240`-`$027F` | palette: 16 entries x 4 bytes `{red, green, blue, -}` |
 | `$0280`-`$02BF` | keyboard: Apple Desktop Bus host |
-| `$02C0`-`$02FF` | SD card *(not implemented, reads `$FF`)* |
+| `$02C0`-`$02FF` | SD card: the microSD slot in SPI mode (see [SD card](#sd-card----02c0)) |
 | `$0300`-`$033F` | system control (ROM/RAM soft switch) |
 | `$0340`-`$037F` | external bus control |
 | `$0380`-`$03BF` | video control (graphics/text mode) |
@@ -94,6 +94,47 @@ window for the external bus:
 
 Each device decodes a 64-byte slot, so its registers repeat within that slot.
 Anything unclaimed in the block reads `$FF`.
+
+### SD card -- `$02C0`
+
+The Tang Nano's microSD slot, as an SPI device (`rtl/sd_spi.v`): CLK is
+SCLK (pin 83), CMD is MOSI (82), D0 is MISO (84, pulled up) and D3 is chip
+select (81). The controller moves bytes; commands, responses and data tokens
+are the software's, as the SD spec's SPI mode has them. SPI mode 0: SCLK
+idles low, MOSI changes on the falling edge and MISO is sampled on the
+rising one; MOSI idles high.
+
+| Address | Register | |
+|---|---|---|
+| `$02C0` | DATA | write: send the byte (an exchange). Read: the byte last received |
+| `$02C1` | NEXT | read: the byte last received, and send `$FF` to receive the next. Writes are ignored |
+| `$02C2` | STATUS / CONTROL | read: bit 7 busy, bit 0 select. Write: bit 0 select, 1 drives chip select low |
+| `$02C3` | DIVIDER | SCLK = 25.2 MHz / (2 * (DIVIDER + 1)); 31 (393.75 kHz) at reset, for the card's start-up; 0 is 12.6 MHz |
+
+The registers repeat through the slot. An exchange takes 16 * (DIVIDER + 1)
++ 1 clocks.
+
+**No polling.** An access to DATA or NEXT while an exchange is running waits
+for it to end: the controller holds the CPU's I/O cycle open, then carries
+the access out. So `sta $02C0` then `lda $02C0` returns the card's reply to
+the byte written, and a block is read with one `lda $02C1` a byte, as fast
+as the card goes. STATUS never waits. NEXT returns the byte the previous
+exchange received, so the read that returns the data token `$FE` has
+already started the exchange for the block's first byte.
+
+`sim/sd_card_model.v` is an SDHC card in SPI mode (CMD0, 8, 9, 10, 12, 13,
+16, 17, 18, 24, 25, 55, ACMD41 and 58). `sim/tb_sd_spi.v` runs the card's
+start-up at the slow clock, then single and multiple block reads and
+writes at DIVIDER 0, checking the data and CRCs, with NEXT back to back and
+at random spacings, the SCLK rates and the exchange time:
+
+```sh
+iverilog -g2005 -o /tmp/sdsim rtl/sd_spi.v sim/sd_card_model.v sim/tb_sd_spi.v && vvp /tmp/sdsim
+```
+
+The SoC simulation has the card too: `+sd=image.hex` (a byte a line, as
+`xxd -p -c1` writes it) puts one in the slot. em16's `test/sd.sh` (65Tools)
+gives the same output on it as on em16 -sd.
 
 ### System control -- `$0300`
 

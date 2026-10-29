@@ -35,7 +35,7 @@ Each item is marked:
 | Tick timer, the operating system's clock | | FPGA | Built |
 | Sound, two SIDs | reDIP SID emulation | FPGA, onboard I2S amplifier; stereo DAC optional on the carrier | Built |
 | Ethernet | W5100S | Carrier, on the external bus | Open: proposed below |
-| SD card | | | **Not used**; its pins are free |
+| SD card, a test boot device | `sd_spi.v`, SPI mode | The Tang Nano's microSD slot | Built; untested on the board |
 | Encryption engine, keyboard power-on | | | Open |
 
 The TIM bus is not implemented.
@@ -474,10 +474,36 @@ therefore share them, with **no new pins**:
   the level shifters. **Check.**
 * It needs a magnetics jack (RJ45 with transformer) and a 25 MHz crystal.
 
-The alternative is a W5500 or ENC28J60 on SPI. With the SD card unused, the
-microSD slot's four pins (81-84) are free for that. They are reachable only
-through a microSD breakout plugged into the slot, though, and the SPI
-controller would have to be built. The W5100S on the bus is simpler.
+The alternative is a W5500 or ENC28J60 on SPI. There are no pins left for
+one: the microSD slot's four (81-84) are the SD card's. The W5100S on the
+bus needs none.
+
+## SD card
+
+The Tang Nano's microSD slot, in SPI mode, as a test boot device. The
+controller is `rtl/sd_spi.v` at `$02C0`; its registers are in
+`fpga/README.md`. It needs nothing on the carrier.
+
+| SD signal | SPI use | Pin |
+|---|---|---|
+| CLK | SCLK | 83 |
+| CMD | MOSI | 82 |
+| D0 | MISO, pulled up in the FPGA | 84 |
+| D3 | chip select | 81 |
+| D1 | not used in SPI mode | 85, `dma_tc` |
+| D2 | not used in SPI mode | 80, `dma_drq[1]` |
+
+**D1 and D2 are shared with DMA, and that is safe with a card in the slot.**
+A card in SPI mode neither drives nor reads its D1 and D2, so `TC` (an
+output) and `DRQ1` (driven by the carrier's 74LVC125A) only see the card's
+input load and the board's 10k pull-ups. Before SPI mode a card is in SD
+mode, where it drives its data lines only in reply to a data command. The
+first command it gets is CMD0 with chip select low, which puts it in SPI
+mode. **Check** on the board: a floppy DMA transfer with a card in the slot.
+
+4-bit SD mode would need D1 and D2 as well, and there are no pins to move
+DMA to. SPI at 12.6 MHz is over 1 MB/s on the wire; a CPU loop reading a
+block is the limit.
 
 ## ADB
 
@@ -610,22 +636,24 @@ well as the UART.
 | 71, 72, 73 | `ext_sel[2:0]`, the select code | Sch, Built | `ext_sel_n[2:0]` | Header only. They carry HSPI labels but don't reach the BL616. |
 | 74 | `ext_sel_en_n`, the select enable | Sch, Built | `ext_sel_n[3]` | Header only |
 | 79 | `dma_drq[0]`, SCSI | Sch, Built | unused | The WS2812 LED, with a 5.1k pull-down. The pull-down suits an active-high input. The LED may flicker during DMA. |
-| 80 | `dma_drq[1]`, floppy | Sch, Built | unused | SD D2, with a 10k pull-up. Free, because the SD card isn't used. |
-| 85 | `dma_tc` | Sch, Built | unused | SD D1, with a 10k pull-up. Free for the same reason. |
+| 80 | `dma_drq[1]`, floppy | Sch, Built | unused | SD D2, with a 10k pull-up. A card in SPI mode doesn't use it; see [SD card](#sd-card). |
+| 85 | `dma_tc` | Sch, Built | unused | SD D1, with a 10k pull-up. The same. |
+| 81, 82, 83, 84 | SD card: chip select, MOSI, SCLK, MISO | Sch, Built | unused | The microSD slot's D3, CMD, CLK and D0, in SPI mode. See [SD card](#sd-card). |
 | 51, 54, 55, 56 | sound | Sch, Built | unused | The onboard I2S amplifier. See [Sound](#sound). |
 
 ### Spare or not usable
 
 | Pin | Status |
 |---|---|
-| 81-84 | Spare: the microSD slot, now unused. Reachable only through a microSD breakout in the slot. |
 | 52, 53 | Spare, with care: HDMI DDC, with 2.2k pull-ups, and the monitor is on the lines. |
 | 32 | Spare, with difficulty: LCD connector only. It needs an FPC breakout, and FPC pins 1-2 carry the backlight boost output. |
 | 26 | Not usable: HDMI hot-plug detect, 2.2k to the connector and 5.1k to ground. It reads low without a monitor asserting hot-plug, which was the cause of the spurious ADB SRQ. It is usable only as that input. |
 | 13 | Not usable: BL616 SPI clock. |
 
-That accounts for 23 external-bus and DMA pins, up from 20, and four for sound.
-Six spare pins remain: four through the microSD slot and two on the DDC lines.
+That accounts for 23 external-bus and DMA pins, up from 20, four for sound
+and four for the SD card.
+Two spare pins remain, on the DDC lines; the microSD slot's four are the SD
+card's.
 
 ### Edge headers
 
@@ -804,7 +832,7 @@ to the section that explains it.
 ### Not on the carrier
 
 - Mono sound uses the Tang Nano's own amplifier and speaker connector.
-- The SD card is not used.
+- The SD card is the Tang Nano's own microSD slot.
 
 ## Still to do
 

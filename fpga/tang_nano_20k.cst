@@ -95,6 +95,18 @@ IO_PORT "dma_drq[0]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
 IO_PORT "dma_drq[1]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
 IO_PORT "dma_tc"     IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
 
+// The microSD slot in SPI mode (sd_spi.v): CLK, CMD (MOSI), D0 (MISO) and D3
+// (chip select). D1 and D2 are pins 85 and 80, DMA's TC and DRQ1 above: a
+// card in SPI mode leaves them alone. MISO is pulled up, for no card.
+IO_LOC  "sd_clk"  83;
+IO_LOC  "sd_mosi" 82;
+IO_LOC  "sd_miso" 84;
+IO_LOC  "sd_cs_n" 81;
+IO_PORT "sd_clk"  IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
+IO_PORT "sd_mosi" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
+IO_PORT "sd_miso" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_PORT "sd_cs_n" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
 // Serial to the onboard BL616 USB bridge
 IO_LOC  "uart_tx" 69;
 IO_PORT "uart_tx" IO_TYPE=LVCMOS33 DRIVE=8;

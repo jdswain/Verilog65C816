@@ -64,6 +64,11 @@ module top_tang20k #(
     output wire        i2s_lrck,
     output wire        i2s_din,
     output wire        amp_en,
+    // The microSD slot in SPI mode: CLK, CMD, D0 and D3.
+    output wire        sd_clk,
+    output wire        sd_mosi,
+    input  wire        sd_miso,
+    output wire        sd_cs_n,
     // HDMI. A differential pair takes both pin numbers on the _p port only.
     output wire        tmds_clk_p,
     output wire        tmds_clk_n,
@@ -168,7 +173,8 @@ module top_tang20k #(
         .ext_res_n(ext_res_n), .ext_irq_n(ext_irq_n),
         .dma_drq(dma_drq), .dma_tc(dma_tc),
         .i2s_bclk(i2s_bclk), .i2s_lrck(i2s_lrck), .i2s_din(i2s_din),
-        .amp_en(amp_en)
+        .amp_en(amp_en),
+        .sd_clk(sd_clk), .sd_mosi(sd_mosi), .sd_cs_n(sd_cs_n), .sd_miso(sd_miso)
     );
 
     assign led = ~led_active_high;

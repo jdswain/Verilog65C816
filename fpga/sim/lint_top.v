@@ -34,7 +34,8 @@ module lint_top;
         .ext_a(ext_a), .ext_d(ext_d), .ext_sel(ext_sel),
         .ext_sel_en_n(ext_sel_en_n), .ext_rd_n(ext_rd_n), .ext_wr_n(ext_wr_n),
         .ext_res_n(ext_res_n), .ext_irq_n(1'b1),
-        .dma_drq(2'b00), .dma_tc(dma_tc)
+        .dma_drq(2'b00), .dma_tc(dma_tc),
+        .sd_clk(), .sd_mosi(), .sd_miso(1'b1), .sd_cs_n()
     );
 endmodule
 
