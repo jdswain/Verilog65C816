@@ -50,11 +50,13 @@
 //   $0C-$0D  WIDTH       pixels per line, 1..1024
 //   $0E-$0F  HEIGHT      lines, 1..65535
 //   $10      OP          logic operation, low four bits (see below)
-//   $11      COLOUR      low nibble: fill colour; high nibble: transparent colour
+//   $11      COLOUR      low nibble: fill colour (the foreground when
+//                        expanding); high nibble: transparent colour
 //   $12      CONTROL     write: bit 0 start, bit 1 fill, bit 2 transparent,
-//                               bit 3 pattern
-//                        read:  bit 7 busy, bits 3-1 as written
+//                               bit 3 pattern, bit 4 expand
+//                        read:  bit 7 busy, bits 4-1 as written
 //   $13      PAT_Y       bits 2-0: the pattern row for the first line
+//   $14      BACKGROUND  low nibble: the background when expanding
 //   $20-$3F  PATTERN     8 x 8 pixels, row r in bytes 4r..4r+3, the even pixel
 //                        of each byte in its low nibble, as the screen has them
 //
@@ -67,6 +69,15 @@
 // has the pattern aligned to its own x mod 8, and PAT_Y = top mod 8 aligns it
 // to y too, as QuickDraw aligns patterns. With "transparent" set, source
 // pixels equal to the transparent colour leave the destination alone.
+//
+// With "expand" set (and neither "fill" nor "pattern", which win over it) the
+// source is one bit a pixel, as a font stores its glyphs: SRC is then a BYTE
+// address and SRC_STRIDE is in bytes. A line's pixel x is bit 7 - x mod 8 of
+// byte SRC + x div 8, so a line starts on a byte, its leftmost pixel in bit 7.
+// A set bit is the COLOUR register's low nibble, a clear one BACKGROUND, or,
+// with "transparent" set, leaves the destination alone. The colour then goes
+// through OP with the destination as any source pixel does. SDRAM is 8 MB, so
+// bit 23 of a byte address is ignored.
 //
 // OP is a truth table over (source, destination), applied to each bit:
 //   bit 0: result where S=1 D=1      bit 2: result where S=0 D=1
@@ -112,8 +123,8 @@ module blitter (
     reg [15:0] r_sstride, r_dstride;
     reg [10:0] r_width;
     reg [15:0] r_height;
-    reg [3:0]  r_op, r_fill, r_key;
-    reg        r_fillmode, r_trans, r_patmode;
+    reg [3:0]  r_op, r_fill, r_key, r_bg;
+    reg        r_fillmode, r_trans, r_patmode, r_expand;
     reg [2:0]  r_paty;
     reg [7:0]  r_pat [0:31];          // the pattern, a byte a register
 
@@ -131,8 +142,9 @@ module blitter (
             r_src <= 24'd0; r_dst <= 24'd0;
             r_sstride <= 16'd0; r_dstride <= 16'd0;
             r_width <= 11'd0; r_height <= 16'd0;
-            r_op <= 4'd3; r_fill <= 4'd0; r_key <= 4'd0;
+            r_op <= 4'd3; r_fill <= 4'd0; r_key <= 4'd0; r_bg <= 4'd0;
             r_fillmode <= 1'b0; r_trans <= 1'b0; r_patmode <= 1'b0;
+            r_expand <= 1'b0;
             r_paty <= 3'd0;
         end else if (cs && we && !busy && !reg_addr[5]) begin
             case (reg_addr[4:0])
@@ -152,8 +164,9 @@ module blitter (
             5'h0F: r_height[15:8]   <= wdata;
             5'h10: r_op             <= wdata[3:0];
             5'h11: {r_key, r_fill}  <= wdata;
-            5'h12: {r_patmode, r_trans, r_fillmode} <= wdata[3:1];
+            5'h12: {r_expand, r_patmode, r_trans, r_fillmode} <= wdata[4:1];
             5'h13: r_paty           <= wdata[2:0];
+            5'h14: r_bg             <= wdata[3:0];
             default: ;
             endcase
         end
@@ -166,7 +179,8 @@ module blitter (
 
     always @* begin
         if (reg_addr[5])            rdata = r_pat[reg_addr[4:0]];
-        else if (reg_addr == 6'h12) rdata = {busy, 3'b000, r_patmode, r_trans, r_fillmode, 1'b0};
+        else if (reg_addr == 6'h12) rdata = {busy, 2'b00, r_expand, r_patmode, r_trans,
+                                           r_fillmode, 1'b0};
         else if (reg_addr == 6'h13) rdata = {5'd0, r_paty};
         else                        rdata = 8'hFF;
     end
@@ -202,6 +216,14 @@ module blitter (
     wire [11:0] s_span = {7'd0, s_off5} + {1'b0, r_width};   // pixels incl. lead-in
     wire [11:0] d_span = {7'd0, d_off5} + {1'b0, r_width};
     wire [11:0] w_span = {9'd0, d_off}  + {1'b0, r_width};
+    wire [7:0]  w_words = w_span[10:3] + {7'd0, |w_span[2:0]};
+
+    // Expanding, the source is bytes and a burst is 16 of them. Destination
+    // word j takes byte s_byte + j (and the end of the one before), so the
+    // line is read up to byte s_byte + w_words - 1.
+    wire        ex     = r_expand & ~r_fillmode & ~r_patmode;
+    wire [3:0]  s_byte = cur_s[3:0];
+    wire [8:0]  e_span = {5'd0, s_byte} + {1'b0, w_words};
 
     reg [6:0]  s_bursts, d_bursts;    // bursts to read for each
     reg [7:0]  d_words;               // destination words to write
@@ -226,8 +248,22 @@ module blitter (
     wire [4:0]  prow4    = {prow, 2'b00};
     wire [31:0] p_word   = {r_pat[prow4 + 5'd3], r_pat[prow4 + 5'd2],
                             r_pat[prow4 + 5'd1], r_pat[prow4]};
+    // Expanding: destination word j takes byte s_byte + j. Its pixel p is
+    // bit 7 - p + d_off of {the byte before, this byte}.
+    wire [7:0]  e_n      = {4'd0, s_byte} + j;
+    wire [7:0]  e_cur    = sbuf_q[{e_n[1:0], 3'b000} +: 8];
+    reg  [7:0]  e_prev;
+    wire [15:0] e_pair   = {e_prev, e_cur} >> d_off;
+    wire [7:0]  e_bits   = e_pair[7:0];       // pixel p in bit 7 - p
+    reg  [31:0] e_word;
+    integer     q;
+    always @*
+        for (q = 0; q < 8; q = q + 1)
+            e_word[q*4 +: 4] = e_bits[7 - q] ? r_fill : r_bg;
+
     wire [31:0] s_word   = r_patmode  ? p_word :
-                           r_fillmode ? {8{r_fill}} : s_mem;
+                           r_fillmode ? {8{r_fill}} :
+                           ex         ? e_word : s_mem;
     wire [31:0] d_word   = dbuf_q;
 
     // Four product terms per bit, selected by the operation.
@@ -250,7 +286,8 @@ module blitter (
             en = 1'b1;
             if (first_word && p[2:0] < d_off) en = 1'b0;
             if (last_word  && p[2:0] > e_off) en = 1'b0;
-            if (r_trans && s_word[p*4 +: 4] == r_key) en = 1'b0;
+            if (r_trans && (ex ? !e_bits[7 - p] : s_word[p*4 +: 4] == r_key))
+                en = 1'b0;
             if (en) begin
                 merged[p*4 +: 4] = rop[p*4 +: 4];
                 any_en = 1'b1;
@@ -287,9 +324,10 @@ module blitter (
 
             // Geometry for this line.
             S_LINE: begin
-                s_bursts <= s_span[11:5] + (|s_span[4:0]);
+                s_bursts <= ex ? {2'd0, e_span[8:4]} + (|e_span[3:0])
+                               : s_span[11:5] + (|s_span[4:0]);
                 d_bursts <= d_span[11:5] + (|d_span[4:0]);
-                d_words  <= w_span[10:3] + (|w_span[2:0]);
+                d_words  <= w_words;
                 e_off    <= w_span[2:0] - 3'd1;
                 sh       <= k[2:0];
                 // Window word for j = 0, relative to the aligned buffer start;
@@ -306,7 +344,7 @@ module blitter (
                     m_addr <= {cur_d[23:5], 2'b00};
                     state  <= S_RDST;
                 end else begin
-                    m_addr <= {cur_s[23:5], 2'b00};
+                    m_addr <= ex ? {cur_s[22:4], 2'b00} : {cur_s[23:5], 2'b00};
                     state  <= S_RSRC;
                 end
                 m_we  <= 1'b0;
@@ -353,7 +391,7 @@ module blitter (
                     state  <= S_RDST;
                 end else begin
                     j     <= 8'd0;
-                    state <= S_PRIME;
+                    state <= ex ? S_FETCH : S_PRIME;   // bytes need no window
                 end
             end
 
@@ -376,6 +414,7 @@ module blitter (
                 m_wdata <= merged;
                 m_addr  <= cur_d[23:3] + {13'd0, j};
                 s_lo    <= sbuf_q;            // this window's high is the next one's low
+                e_prev  <= e_cur;
                 if (any_en) begin
                     m_we  <= 1'b1;
                     m_req <= 1'b1;
@@ -426,7 +465,8 @@ module blitter (
     always @(posedge clk) begin
         if (state == S_RSRC && m_rvalid) sbuf[buf_wr] <= m_rdata;
         if (state == S_RDST && m_rvalid) dbuf[buf_wr] <= m_rdata;
-        if (state == S_PRIME || state == S_FETCH) sbuf_q <= sbuf[s_idx];
+        if (state == S_PRIME || state == S_FETCH)
+            sbuf_q <= sbuf[ex ? {2'd0, e_n[7:2]} : s_idx];
         if (state == S_FETCH) dbuf_q <= dbuf[{6'd0, cur_d[4:3]} + j];
     end
 endmodule

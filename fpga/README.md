@@ -246,7 +246,7 @@ controller sustains; the rest is left for the CPU.
 ### Blitter -- `$03C0`
 
 Copies or fills a rectangle of pixels in hardware, with a colour or an 8x8
-pattern, combining source and destination through a logic operation and
+pattern, or expands 1-bit glyphs into two colours, combining source and destination through a logic operation and
 optionally skipping one colour. The
 register model is the Atari ST BLiTTER's; the differences come from this
 display being packed pixels rather than bitplanes.
@@ -272,9 +272,10 @@ registers: the blitter works them out from the addresses and the width.
 | `$03CC`-`$03CD` | WIDTH | pixels per line, 1-1024 |
 | `$03CE`-`$03CF` | HEIGHT | lines, 1-65535 |
 | `$03D0` | OP | logic operation, low 4 bits |
-| `$03D1` | COLOUR | low nibble: fill colour. High nibble: transparent colour |
-| `$03D2` | CONTROL | write: bit 0 start, bit 1 fill, bit 2 transparent, bit 3 pattern. Read: bit 7 busy, bits 3-1 as written |
+| `$03D1` | COLOUR | low nibble: fill colour, and the foreground when expanding. High nibble: transparent colour |
+| `$03D2` | CONTROL | write: bit 0 start, bit 1 fill, bit 2 transparent, bit 3 pattern, bit 4 expand. Read: bit 7 busy, bits 4-1 as written |
 | `$03D3` | PAT_Y | bits 2-0: the pattern row for the first line |
+| `$03D4` | BACKGROUND | low nibble: the background when expanding |
 | `$03E0`-`$03FF` | PATTERN | 8x8 pixels: row *r* in bytes 4*r* to 4*r*+3, the even pixel of each byte in its low nibble |
 
 Multi-byte registers are little-endian. Set everything up, write CONTROL with
@@ -291,6 +292,13 @@ CONTROL, PAT_Y and PATTERN read back; the others read `$FF`.
   SRC_STRIDE are ignored. It wins over fill if both are set. A pixel's column
   in the pattern is its destination pixel address mod 8, and its row is PAT_Y
   on the first line, then the next row, mod 8, on each line after.
+* **Expand** (bit 4): the source is 1 bit a pixel, as a font stores its
+  glyphs. SRC is then a **byte** address and SRC_STRIDE is in **bytes**; a
+  line's pixel *x* is bit 7 - *x* mod 8 of byte SRC + *x* div 8, so each line
+  starts on a byte with its leftmost pixel in bit 7. A set bit gives COLOUR's
+  low nibble, a clear one BACKGROUND, or, with transparent set, leaves the
+  destination alone (the transparent colour is not used). Fill and pattern
+  win over it. Bit 23 of SRC is ignored: SDRAM is 8 MB.
 
 The pattern is aligned to the destination, as QuickDraw aligns it to the
 screen. On the screen the pixel base (`$E00000`) and the stride (640) are
@@ -298,6 +306,12 @@ multiples of 8, so the column is *x* mod 8, and PAT_Y = *top* mod 8 makes the
 row *y* mod 8. A pattern in the bytes the screen would hold for an 8x8 tile at
 (0, 0) is written to PATTERN as it is. OP and transparency work as for a copy,
 the pattern as S: copy 3, OR 7, XOR 6, and BIC (D and not S) 4.
+
+An expanded pixel goes through OP the same way, so XOR text works. A glyph
+stored bottom row first is drawn with DST at its bottom line and DST_STRIDE
+-640. On the board a glyph costs about 60 cycles a line (an 8x12 glyph is
+about 770 cycles, 31 us), most of it the two burst reads; the CPU runs
+meanwhile.
 
 OP is a truth table over source and destination bits, in the ST's numbering:
 
@@ -1390,6 +1404,14 @@ A fill or a pattern reads no source line. A destination word starts at a
 multiple of 8 pixels, so its pixel *p* is the pattern's column *p*: the
 source word is the pattern row as it stands, with no shifting.
 
+Expanding, the source line is bytes, read in bursts of 16 from its address
+rounded down to a multiple of 16. Destination word *j* needs 8 bits, which
+come from byte *s + j* (*s* the line's offset in its first burst) and the end
+of the byte before, so each word takes one byte from the buffer, keeps it for
+the next, and shifts the pair by the destination's offset within its first
+word. There is no 64-bit window to prime, so a line goes straight from the
+reads to the first word.
+
 The destination line is always read, even for a plain copy that overwrites
 every pixel, because the partial words at each end need it and treating every
 word alike keeps the control simple. That is about a quarter of the bandwidth
@@ -1399,11 +1421,13 @@ and the obvious thing to optimise. Burst writes would be the next.
 
 `sim/tb_blitter.v` checks blits against a reference that knows nothing about
 words, shifts or masks: an array of pixels, updated the way the definition
-says. Fifteen directed cases (single pixel, full 1024 width, overlap,
+says. Twenty-three directed cases (single pixel, full 1024 width, overlap,
 scrolling both ways, fill, XOR, transparency, patterns with odd edges in the
-four QuickDraw modes, zero width) and 400 random ones, with random alignment,
-strides of either sign, all 16 operations, deliberate overlap, and a quarter
-of them patterns, with random rows and patterns. It also writes PATTERN while
+four QuickDraw modes, expanded glyphs of widths 1 to 203 with odd and even
+destinations, negative strides, background, transparency, OR, XOR and BIC,
+zero width) and 500 random ones, with random alignment, strides of either
+sign, all 16 operations, deliberate overlap, a quarter of them patterns, with
+random rows and patterns, and a quarter expanded. It also writes PATTERN while
 a blit is busy, and reads it back. A second master reads continuously on the CPU's port throughout, to
 check the blitter leaves it room.
 

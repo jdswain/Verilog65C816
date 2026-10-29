@@ -113,6 +113,7 @@ module tb_blitter;
     reg [3:0] refp [0:PIXELS-1];
     reg [3:0] line [0:1023];
     reg [3:0] pat  [0:63];            // the pattern, pixel 8r + c
+    reg       lbit [0:1023];          // expanding: the line's source bits
 
     function [3:0] rop4(input [3:0] op, input [3:0] s, input [3:0] d);
         integer b;
@@ -124,21 +125,36 @@ module tb_blitter;
 
     integer errors = 0, tests = 0, seed;
     integer src, dst, sst, dst_st, w, h, op, fill, key, fmode, tmode, pmode, paty;
+    integer emode, bg, xmode;
     integer x, y, n, i, a, lo, hi, tries, ok, t_start, t_cyc, cyc = 0;
     always @(posedge clk) cyc = cyc + 1;
     reg [3:0] s4, d4;
+    reg [7:0] sb;
     reg [31:0] word;
+
+    // Byte b of memory, as the pixel array holds it: its even pixel low.
+    function [7:0] mbyte(input integer b);
+        mbyte = {refp[2*b + 1], refp[2*b]};
+    endfunction
 
     task model;
         begin
+            xmode = emode && !fmode && !pmode;
             for (y = 0; y < h; y = y + 1) begin
-                for (x = 0; x < w; x = x + 1)
+                for (x = 0; x < w; x = x + 1) begin
+                    if (xmode) begin
+                        sb = mbyte(src + y*sst + x/8);
+                        lbit[x] = sb[7 - x%8];
+                    end
                     line[x] = pmode ? pat[((paty + y) & 7)*8 + ((dst + y*dst_st + x) & 7)]
-                            : fmode ? fill[3:0] : refp[src + y*sst + x];
+                            : fmode ? fill[3:0]
+                            : xmode ? (lbit[x] ? fill[3:0] : bg[3:0])
+                            : refp[src + y*sst + x];
+                end
                 for (x = 0; x < w; x = x + 1) begin
                     s4 = line[x];
                     d4 = refp[dst + y*dst_st + x];
-                    if (!(tmode && s4 == key[3:0]))
+                    if (!(tmode && (xmode ? !lbit[x] : s4 == key[3:0])))
                         refp[dst + y*dst_st + x] = rop4(op[3:0], s4, d4);
                 end
             end
@@ -156,8 +172,9 @@ module tb_blitter;
             wr(5'h10, op[7:0]);
             wr(5'h11, {key[3:0], fill[3:0]});
             wr(6'h13, paty[7:0]);
+            wr(6'h14, bg[7:0]);
             t_start = cyc;
-            wr(5'h12, {4'd0, pmode[0], tmode[0], fmode[0], 1'b1});
+            wr(5'h12, {3'd0, emode[0], pmode[0], tmode[0], fmode[0], 1'b1});
             @(posedge clk); #1;
             if (!busy) begin
                 $display("FAIL: not busy after start"); errors = errors + 1;
@@ -177,9 +194,9 @@ module tb_blitter;
                 word = mem.mem[n >> 3];
                 if (word[(n & 7)*4 +: 4] !== refp[n]) begin
                     if (bad < 4)
-                        $display("FAIL %0s: pixel %0d = %x, want %x  (src=%0d dst=%0d w=%0d h=%0d sst=%0d dst_st=%0d op=%0d fill=%0d trans=%0d pat=%0d paty=%0d)",
+                        $display("FAIL %0s: pixel %0d = %x, want %x  (src=%0d dst=%0d w=%0d h=%0d sst=%0d dst_st=%0d op=%0d fill=%0d trans=%0d pat=%0d paty=%0d expand=%0d)",
                                  what, n, word[(n & 7)*4 +: 4], refp[n],
-                                 src, dst, w, h, sst, dst_st, op, fmode, tmode, pmode, paty);
+                                 src, dst, w, h, sst, dst_st, op, fmode, tmode, pmode, paty, emode);
                     bad = bad + 1;
                 end
             end
@@ -238,6 +255,7 @@ module tb_blitter;
         // A plain aligned copy.
         src = 1024; dst = 4096; sst = 640; dst_st = 640; w = 64; h = 3;
         op = 3; fill = 0; key = 0; fmode = 0; tmode = 0; pmode = 0; paty = 0;
+        emode = 0; bg = 0;
         model; run_blit; check("aligned copy");
 
         // One pixel, mid-word.
@@ -290,6 +308,35 @@ module tb_blitter;
         if (rdata !== 8'h07) begin $display("FAIL: PAT_Y reads %x", rdata); errors = errors + 1; end
         pmode = 0; tmode = 0;
 
+        // Expanding 1-bit glyphs, as a font stores them: SRC a byte address,
+        // rows of (w + 7) div 8 bytes. Widths that are not multiples of 8, odd
+        // and even destinations, a negative destination stride (glyph rows go
+        // up the screen), transparent and background, OPs other than copy.
+        emode = 1; fill = 12; bg = 5; key = 0;
+        src = 30000; sst = 1; dst = 90000 + 11*640; dst_st = -640; w = 5; h = 12; op = 3;
+        model; run_blit; check("expand 5 wide, up the screen");
+        $display("expand 5 x 12: %0d cycles", t_cyc);
+        src = 30100; sst = 1; dst = 90000 + 11*640 + 8; w = 8; h = 12;
+        model; run_blit; check("expand 8 wide");
+        $display("expand 8 x 12: %0d cycles", t_cyc);
+        src = 30200; sst = 2; dst = 90000 + 15*640 + 21; w = 13; h = 16; tmode = 1;
+        model; run_blit; check("expand 13 wide, odd, transparent");
+        $display("expand 13 x 16, transparent: %0d cycles", t_cyc);
+        src = 30300 + 9*2; sst = -2; dst = 90000 + 20*640 + 40; dst_st = 640; w = 16; h = 10;
+        op = 6; tmode = 0;
+        model; run_blit; check("expand 16 wide, xor, both strides negative");
+        src = 30401; sst = 3; dst = 90000 + 32*640 + 3; w = 7; h = 9; op = 7; tmode = 1;
+        model; run_blit; check("expand or, odd source byte");
+        src = 30507; sst = 26; dst = 90000 + 42*640 + 6; w = 203; h = 3; op = 4; tmode = 0;
+        model; run_blit; check("expand 203 wide, bic");
+        src = 30600; sst = 1; dst = 90000 + 50*640 + 1; w = 1; h = 1; op = 3;
+        model; run_blit; check("expand one pixel");
+        src = 30700; sst = 1; dst = 90000 + 52*640 + 2; w = 6; h = 4; fmode = 1;
+        model; run_blit; check("expand, fill wins");
+        @(negedge clk); reg_addr = 6'h12; #1;
+        if (rdata !== 8'h12) begin $display("FAIL: CONTROL reads %x", rdata); errors = errors + 1; end
+        fmode = 0; emode = 0; tmode = 0;
+
         // Nothing to do.
         w = 0; h = 3; tmode = 0;
         wr16(5'h0C, 16'd0); wr(5'h12, 8'h01);
@@ -299,8 +346,9 @@ module tb_blitter;
         $display("directed: %0d test(s), %0d failed", tests, errors);
 
         // ---- random ----
-        for (i = 0; i < 400; i = i + 1) begin
+        for (i = 0; i < 500; i = i + 1) begin
             ok = 0; tries = 0;
+            emode = ({$random(seed)} % 4) == 0;
             while (!ok) begin
                 w      = ($random(seed) & 1) ? 1 + ({$random(seed)} % 40)
                                              : 1 + ({$random(seed)} % 300);
@@ -311,14 +359,27 @@ module tb_blitter;
                 // near the source often, so that overlaps actually happen
                 dst    = ($random(seed) & 1) ? {$random(seed)} % LIMIT
                                              : src + ($random(seed) % 700);
-                extent(src, sst, slo, shi);
+                if (emode) begin
+                    // a 1-bit source: bytes, rows of (w + 7) div 8 or more
+                    sst = ($random(seed) & 1) ? (w + 7) / 8 : ($random(seed) % 120);
+                    src = {$random(seed)} % (LIMIT / 2);
+                end
                 extent(dst, dst_st, dlo, dhi);
-                ok = (slo >= 0 && shi < LIMIT && dlo >= 0 && dhi < LIMIT);
+                if (emode) begin
+                    slo = src; shi = src + (w + 7) / 8;
+                    if (sst < 0) slo = src + (h - 1) * sst;
+                    else         shi = shi + (h - 1) * sst;
+                    ok = (slo >= 0 && shi < LIMIT / 2 && dlo >= 0 && dhi < LIMIT);
+                end else begin
+                    extent(src, sst, slo, shi);
+                    ok = (slo >= 0 && shi < LIMIT && dlo >= 0 && dhi < LIMIT);
+                end
                 tries = tries + 1;
             end
             op    = {$random(seed)} % 16;
             fill  = {$random(seed)} % 16;
             key   = {$random(seed)} % 16;
+            bg    = {$random(seed)} % 16;
             fmode = ({$random(seed)} % 4) == 0;
             tmode = ({$random(seed)} % 3) == 0;
             pmode = ({$random(seed)} % 4) == 0;
