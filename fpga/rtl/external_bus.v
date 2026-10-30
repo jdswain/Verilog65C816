@@ -5,17 +5,19 @@
 // 82077AA, both halves of the Z85C80, the W5100S). docs/Hardware.md has the
 // reasoning; the 6502 style and its PHI0 clock are gone.
 //
-// TIMING. The bridge counts in a bus clock T of three system clocks: 119 ns
-// at 25.2 MHz, a bus clock of 8.4 MHz. No clock goes to the cards; T is only
-// the unit. Counting system clocks from the one that starts a cycle:
+// TIMING. The bridge counts in a bus clock T of T_CLKS system clocks, at
+// least 119 ns (8.4 MHz), and an edge gap H of H_CLKS clocks, at least 40 ns;
+// soc.v works both out from the system clock. No clock goes to the cards; T
+// is only the unit. At 25.2 MHz T is 3 clocks and H is 1. Counting system
+// clocks from the one that starts a cycle:
 //
-//    0   address (ext_a), select code and, for a write, data go out
-//    1   select enable falls: the decoder's inputs have settled first
-//    3   RD# or WR# falls (T2): one T of address and select setup
-//    9   the strobe rises (end of T3), and read data is taken from the
-//        bus as it was in the strobe's last clock: a 238 ns strobe
-//   10   the enable rises: 40 ns of hold
-//   11   data stops being driven, and the CPU gets ack
+//    0     address (ext_a), select code and, for a write, data go out
+//    H     select enable falls: the decoder's inputs have settled first
+//    T     RD# or WR# falls (T2): one T of address and select setup
+//    3T    the strobe rises (end of T3), and read data is taken from the
+//          bus as it was in the strobe's last clock: a 2T (238 ns) strobe
+//    3T+H  the enable rises: 40 ns of hold
+//    3T+H+1  data stops being driven, and the CPU gets ack
 //
 // A cycle takes about 480 ns, against 1-2 us with the old 1 MHz PHI0.
 //
@@ -28,10 +30,10 @@
 //
 // SCC RECOVERY. The Z85C30 needs 3.5 PCLK periods (475 ns at 7.3728 MHz)
 // from one access's falling strobe to the next's. Back-to-back cycles here
-// are only just further apart (13 clocks, 516 ns), and a DMA cycle could
-// come sooner. A cycle to slot 2, the SCC, waits until its
-// strobe will fall at least 5T (15 clocks, 595 ns) after the last one to
-// slot 2 fell. No other slot waits.
+// are only just further apart (13 clocks, 516 ns, at 25.2 MHz), and a DMA
+// cycle could come sooner. A cycle to slot 2, the SCC, waits until its
+// strobe will fall at least 5T (595 ns or more) after the last one to slot
+// 2 fell. No other slot waits.
 //
 // RESET. While RES# is asserted -- the SoC in reset, or the card_reset bit
 // -- RD# and WR# are both held low. Only the SCC takes that as a reset; the
@@ -53,7 +55,8 @@
 `default_nettype none
 
 module external_bus #(
-    parameter integer T_CLKS = 3           // system clocks in a bus clock T
+    parameter integer T_CLKS = 3,          // system clocks in a bus clock T
+    parameter integer H_CLKS = 1           // system clocks in 40 ns
 ) (
     input  wire       clk,
     input  wire       rst_n,
@@ -92,11 +95,11 @@ module external_bus #(
     input  wire        ext_irq_n
 );
     localparam integer CW = 5;
-    localparam [CW-1:0] C_EN     = 1;               // enable falls
-    localparam [CW-1:0] C_STROBE = T_CLKS;          // strobe falls
-    localparam [CW-1:0] C_RISE   = 3 * T_CLKS;      // strobe rises
-    localparam [CW-1:0] C_HOLD   = 3 * T_CLKS + 1;  // enable rises
-    localparam [CW-1:0] C_END    = 3 * T_CLKS + 2;  // data released, ack
+    localparam [CW-1:0] C_EN     = H_CLKS;                  // enable falls
+    localparam [CW-1:0] C_STROBE = T_CLKS;                  // strobe falls
+    localparam [CW-1:0] C_RISE   = 3 * T_CLKS;              // strobe rises
+    localparam [CW-1:0] C_HOLD   = 3 * T_CLKS + H_CLKS;     // enable rises
+    localparam [CW-1:0] C_END    = 3 * T_CLKS + H_CLKS + 1; // data released, ack
 
     // From one SCC strobe's fall to the next's: 5T. The next cycle's strobe
     // falls C_STROBE clocks after it starts, so it may start this much

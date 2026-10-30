@@ -20,6 +20,9 @@ module tb_soc #(
     // to model the real 27 MHz / 115200 baud ratio.
     parameter integer DIVISOR  = 8,         // short bit cells: this is a sim
     parameter integer CLK_HALF = 5,         // 100 MHz nominal
+    // The clock the SoC is built for: its timer prescaler, external bus
+    // and DMA timings, SDRAM refresh, ADB, SD and sound derive from it.
+    parameter integer SYS_HZ   = 25_200_000,
     parameter integer TIMEOUT  = 4_000_000,
     // Idle time between typed characters. The monitor echoes each character
     // and ser_putc blocks until the transmitter drains, so input sent with no
@@ -71,7 +74,7 @@ module tb_soc #(
     wire sd_clk, sd_mosi, sd_cs_n, sd_card_miso, sd_card_oe;
     wire sd_miso = sd_card_oe ? sd_card_miso : 1'b1;
 
-    soc #(.ROM_HEX(ROM_HEX), .DIVISOR(DIVISOR),
+    soc #(.ROM_HEX(ROM_HEX), .DIVISOR(DIVISOR), .SYS_HZ(SYS_HZ),
           .MAP(MAP), .ROM_BITS(ROM_BITS), .ROM_BASE(ROM_BASE)) dut (
         .clk(clk), .rst_n(rst_n), .rxd(rxd), .txd(txd), .led(led),
         .dbg_addr(), .dbg_vld(), .dbg_we(), .dbg_stopped(),

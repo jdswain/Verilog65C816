@@ -87,7 +87,7 @@ module soc #(
     // the disk registers simply read back ROM filler.
     parameter integer MAP       = 0,
     parameter         USE_VIDEO = 1,
-    parameter integer SYS_HZ    = 25_200_000,   // drives SDRAM refresh timing
+    parameter integer SYS_HZ    = 25_200_000,   // the clock: timings derive from it
     parameter integer ROM_BITS  = 13,       // 8 KB
     parameter [15:0]  ROM_BASE  = 16'hE000
 ) (
@@ -467,7 +467,8 @@ module soc #(
             .busy()
         );
 
-        dma u_dma (
+        // DRQ is looked at again some 80 ns after a cycle.
+        dma #(.DRQ_HOLD((SYS_HZ + 6_250_000) / 12_500_000)) u_dma (
             .clk(clk), .rst_n(rst_n),
             .reg_addr(addr[4:0]), .wdata(wdata), .rdata(dma_q),
             .cs(stb & sel_dma), .we(we), .irq(), .irq_ch(dma_irq),
@@ -635,7 +636,9 @@ module soc #(
     end
 
     wire [7:0] tmr_q;
-    timer u_timer (
+    // The timer counts at 25.2 MHz at any system clock of 25.2 MHz or more
+    // (SYS_HZ a multiple of 100 kHz).
+    timer #(.TNUM(252), .TDEN(SYS_HZ / 100_000)) u_timer (
         .clk(clk), .rst_n(rst_n),
         .reg_addr(addr[3:0]), .wdata(wdata), .rdata(tmr_q),
         .cs(stb & sel_irq & addr[4]), .we(we), .pending(tmr_irq)
@@ -681,7 +684,11 @@ module soc #(
     assign ext_ack = bridge_ack | scc_ack;
     assign ext_q   = scc_ack ? scc_q : bridge_q;
 
-    external_bus u_ext (
+    // T at least 119 ns, H at least 40 ns, in system clocks.
+    external_bus #(
+        .T_CLKS((SYS_HZ + 8_399_999) / 8_400_000),
+        .H_CLKS((SYS_HZ + 25_199_999) / 25_200_000)
+    ) u_ext (
         .clk(clk), .rst_n(rst_n),
         .addr(addr[10:0]), .wdata(wdata), .rdata(bridge_q),
         .req(vld & sel_ext & ~scc_slot), .we(we), .ack(bridge_ack),

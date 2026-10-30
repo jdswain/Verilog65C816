@@ -4,8 +4,14 @@
 // Goals: functional compatibility, NOT cycle accuracy. Every bus cycle does
 // useful work: there are no dummy/phantom reads or writes (unlike the real
 // chip / 6502). Most instructions complete in fewer cycles than the real
-// part. Implied register ops (TAX, INX, CLC, XCE, ...) execute in a single
-// cycle, folded into the opcode fetch.
+// part. Implied register ops (TAX, INX, CLC, XCE, ...) take a single cycle:
+// latched at their fetch, executed during the next opcode's.
+//
+// Nothing computes on the read data in the cycle it arrives, and the bus
+// address is a mux of registers. A read's operand is latched and its execute
+// runs in the next cycle (xp), overlapped with the next opcode fetch, as is an
+// implied opcode's (lp); an RMW's result is formed in its write cycle. Only a
+// pull fetched behind such an execute, and an interrupt, wait a cycle for it.
 //
 // Bus protocol (simple synchronous SRAM-style):
 //   - When `vld` is high a bus cycle is in progress at `addr`.
@@ -105,7 +111,8 @@ module cpu_65c816 (
         S_MVR   = 5'd17,  // block move read
         S_MVW   = 5'd18,  // block move write
         S_WAI   = 5'd19,  // waiting for interrupt
-        S_STP   = 5'd20;  // stopped
+        S_STP   = 5'd20,  // stopped
+        S_IMP   = 5'd21;  // push / WAI / STP setup
 
     reg [4:0] state;
     assign stopped = (state == S_STP);
@@ -149,6 +156,16 @@ module cpu_65c816 (
     reg [1:0]  post_push;     // routing after the last push
     reg [1:0]  pull_idx;
     reg [15:0] vec;           // interrupt vector address (bank 0)
+    reg [23:0] taddr_alt;     // the other byte's address of a 16-bit access
+    reg [23:0] pa;            // the next pull's address
+    // Deferred execute: a read-class instruction's operand is latched as it
+    // arrives (xm) and executed in the next cycle, the following opcode fetch,
+    // so no ALU sits behind the read data. An opcode that is itself executed
+    // in the fetch cycle, or an interrupt, waits a cycle for it.
+    reg        xp;            // an execute is pending, of xm
+    reg        lp;            // an implied opcode's execute is pending (IR)
+    reg [15:0] xm;
+    reg        snap_late;     // the ABORT snapshot's registers, a cycle late
 
     localparam [1:0] PP_FETCH=2'd0, PP_VEC=2'd1, PP_PTR=2'd2;
 
@@ -433,6 +450,29 @@ module cpu_65c816 (
     // would build a separate 256-way decoder each time.
     wire [12:0] dec_in = dec(rdata);
 
+    // The opcode being fetched: implied (executed in the next cycle, lp),
+    // a push, WAI or STP (S_IMP), or a pull (S_PULL).
+    reg fetch_local, fetch_setup;
+    always @* begin
+        fetch_local = 1'b0; fetch_setup = 1'b0;
+        case (rdata)
+        8'h18, 8'h38, 8'h58, 8'h78, 8'hB8, 8'hD8, 8'hF8, 8'hEA,
+        8'h0A, 8'h2A, 8'h4A, 8'h6A, 8'h1A, 8'h3A,
+        8'hAA, 8'hA8, 8'h8A, 8'h98, 8'hBA, 8'h9A, 8'h9B, 8'hBB,
+        8'h1B, 8'h3B, 8'h5B, 8'h7B, 8'hE8, 8'hCA, 8'hC8, 8'h88,
+        8'hEB, 8'hFB: fetch_local = 1'b1;
+        8'h08, 8'h0B, 8'h48, 8'h4B, 8'h5A, 8'h8B, 8'hDA,
+        8'hCB, 8'hDB: fetch_setup = 1'b1;
+        default: ;
+        endcase
+    end
+    wire fetch_pull = (rdata == 8'h28) | (rdata == 8'h2B) | (rdata == 8'h68) |
+                      (rdata == 8'h7A) | (rdata == 8'hAB) | (rdata == 8'hFA) |
+                      (rdata == 8'h40) | (rdata == 8'h60) | (rdata == 8'h6B);
+
+    // PLB, PLD and RTL use the 16-bit stack in emulation mode
+    wire pull16 = (rdata == 8'h2B) | (rdata == 8'h6B) | (rdata == 8'hAB);
+
     // operand width for reads/RMW; stores have their own
     wire op_xwide = (d_op==OP_LDX)||(d_op==OP_LDY)||(d_op==OP_CPX)||
                     (d_op==OP_CPY)||(d_op==OP_STX)||(d_op==OP_STY);
@@ -469,12 +509,13 @@ module cpu_65c816 (
     wire [15:0] dbase = bk ? {D[7:0], 8'h00} : D;
     wire [7:0]  dbank = bk ? D[15:8] : 8'h00;
 
-    // common address helpers
+    // common address helpers. The bus address is a mux of registers only:
+    // the second byte's address of a word (taddr1), a pointer's next byte,
+    // the next pull and the vector's high byte are all stepped into their
+    // registers a cycle ahead, so no adder sits in front of the memory.
     wire [23:0] taddr1   = wrap16 ? {taddr[23:16], taddr[15:0] + 16'd1}
                                   : taddr + 24'd1;
     wire [23:0] sp_push  = (fE & ~stk16) ? {16'h0001, S[7:0]} : {dbank, S};
-    wire [23:0] sp_pull  = (fE & ~stk16) ? {16'h0001, S[7:0] + 8'd1}
-                                         : {dbank, S + 16'd1};
     wire [15:0] pcn      = PC + 16'd1;   // PC after the current operand byte
 
     // P register byte (brkbit: value of bit4 in emulation mode)
@@ -673,27 +714,36 @@ module cpu_65c816 (
     // RMW / accumulator shift-and-step core. op given explicitly so the
     // accumulator forms can run during S_FETCH (before IR is loaded).
     // to_a=1: result goes to A; else to tdata for write-back.
+    // Everything it reads is an argument: a function called from a
+    // continuous assignment is re-evaluated only when its arguments change.
+    function [15:0] rmw_val(input [4:0] op, input [15:0] m, input [15:0] a,
+                            input c, input w);
+        case (op)
+        OP_ASL: rmw_val = {m[14:0], 1'b0};
+        OP_ROL: rmw_val = {m[14:0], c};
+        OP_LSR: rmw_val = w ? {1'b0, m[15:1]} : {8'h00, 1'b0, m[7:1]};
+        OP_ROR: rmw_val = w ? {c, m[15:1]} : {8'h00, c, m[7:1]};
+        OP_INC: rmw_val = m + 16'd1;
+        OP_DEC: rmw_val = m - 16'd1;
+        OP_TSB: rmw_val = m | a;
+        OP_TRB: rmw_val = m & ~a;
+        default: rmw_val = m;
+        endcase
+    endfunction
+
+    // A memory RMW's result, from its latched operand: written in S_WBL.
+    wire [15:0] rmw_r = rmw_val(d_op, xm, av, fC, m16);
+
     task rmw_core(input [4:0] op, input [15:0] m, input to_a);
         reg [15:0] r;
         reg c, setc;
         begin
-            c = fC; setc = 1'b1;
+            r = rmw_val(op, m, av, fC, m16);
+            c = fC; setc = 1'b0;
             case (op)
-            OP_ASL: begin r = {m[14:0], 1'b0};  c = m16 ? m[15] : m[7]; end
-            OP_ROL: begin r = {m[14:0], fC};    c = m16 ? m[15] : m[7]; end
-            OP_LSR: begin
-                r = m16 ? {1'b0, m[15:1]} : {8'h00, 1'b0, m[7:1]};
-                c = m[0];
-            end
-            OP_ROR: begin
-                r = m16 ? {fC, m[15:1]} : {8'h00, fC, m[7:1]};
-                c = m[0];
-            end
-            OP_INC: begin r = m + 16'd1; setc = 1'b0; end
-            OP_DEC: begin r = m - 16'd1; setc = 1'b0; end
-            OP_TSB: begin r = m | av;    setc = 1'b0; end
-            OP_TRB: begin r = m & ~av;   setc = 1'b0; end
-            default: begin r = m;        setc = 1'b0; end
+            OP_ASL, OP_ROL: begin c = m16 ? m[15] : m[7]; setc = 1'b1; end
+            OP_LSR, OP_ROR: begin c = m[0];               setc = 1'b1; end
+            default: ;
             endcase
             if (setc) fC <= c;
             if (op == OP_TSB || op == OP_TRB) begin
@@ -707,6 +757,69 @@ module cpu_65c816 (
             end else begin
                 tdata <= r;
             end
+        end
+    endtask
+
+    // An implied opcode, latched in IR at its fetch and executed in the next
+    // cycle (lp), overlapped with the following opcode's fetch.
+    task exec_imp;
+        begin
+            case (IR)
+            // ---- flag ops (1 cycle) ----
+            8'h18: fC <= 1'b0;                       // CLC
+            8'h38: fC <= 1'b1;                       // SEC
+            8'h58: fI <= 1'b0;                       // CLI
+            8'h78: fI <= 1'b1;                       // SEI
+            8'hB8: fV <= 1'b0;                       // CLV
+            8'hD8: fD <= 1'b0;                       // CLD
+            8'hF8: fD <= 1'b1;                       // SED
+            8'hEA: ;                                 // NOP
+            // ---- accumulator shifts / inc / dec (1 cycle) ----
+            8'h0A: rmw_core(OP_ASL, av, 1'b1);
+            8'h2A: rmw_core(OP_ROL, av, 1'b1);
+            8'h4A: rmw_core(OP_LSR, av, 1'b1);
+            8'h6A: rmw_core(OP_ROR, av, 1'b1);
+            8'h1A: rmw_core(OP_INC, av, 1'b1);
+            8'h3A: rmw_core(OP_DEC, av, 1'b1);
+            // ---- transfers (1 cycle) ----
+            8'hAA: ld_x(A);                          // TAX
+            8'hA8: ld_y(A);                          // TAY
+            8'h8A: ld_a(X);                          // TXA
+            8'h98: ld_a(Y);                          // TYA
+            8'hBA: ld_x(S);                          // TSX
+            8'h9A: S <= fE ? {8'h01, X[7:0]} : X;    // TXS
+            8'h9B: ld_y(X);                          // TXY
+            8'hBB: ld_x(Y);                          // TYX
+            8'h1B: S <= fE ? {8'h01, A[7:0]} : A;    // TCS
+            8'h3B: begin                             // TSC
+                A <= S; fN <= S[15]; fZ <= (S == 16'h0000);
+            end
+            8'h5B: begin                             // TCD
+                D <= A; fN <= A[15]; fZ <= (A == 16'h0000);
+            end
+            8'h7B: begin                             // TDC
+                A <= D; fN <= D[15]; fZ <= (D == 16'h0000);
+            end
+            // ---- index inc/dec (1 cycle) ----
+            8'hE8: ld_x(X + 16'd1);                  // INX
+            8'hCA: ld_x(X - 16'd1);                  // DEX
+            8'hC8: ld_y(Y + 16'd1);                  // INY
+            8'h88: ld_y(Y - 16'd1);                  // DEY
+            // ---- XBA / XCE (1 cycle) ----
+            8'hEB: begin                             // XBA
+                A <= {A[7:0], A[15:8]};
+                fN <= A[15]; fZ <= (A[15:8] == 8'h00);
+            end
+            8'hFB: begin                             // XCE
+                fC <= fE; fE <= fC;
+                if (fC) begin                        // entering emulation
+                    fM <= 1'b1; fX <= 1'b1;
+                    X[15:8] <= 8'h00; Y[15:8] <= 8'h00;
+                    S[15:8] <= 8'h01;
+                end
+            end
+            default: ;
+            endcase
         end
     endtask
 
@@ -756,16 +869,26 @@ module cpu_65c816 (
     // vector (native $FFE8 / emulation $FFF8).
     task abort_entry;
         reg [7:0] pb;
+        reg       e;
         begin
-            pb = {sfN, sfV, sfE ? 1'b1 : sfM, sfE ? 1'b0 : sfX,
-                  sfD, sfI, sfZ, sfC};
-            A <= sA; X <= sX; Y <= sY; S <= sS; D <= sD; DBR <= sDBR; xb <= sxb;
-            fN <= sfN; fV <= sfV; fM <= sfM; fX <= sfX;
-            fZ <= sfZ; fC <= sfC; fE <= sfE;
-            if (sfE) begin push_q <= {sPC, pb, 8'h00}; push_n <= 3'd3; end
-            else     begin push_q <= {sPBR, sPC, pb};  push_n <= 3'd4; end
+            // With snap_late set the snapshot of what an execute changes is
+            // still being taken: those registers are right as they are.
+            if (snap_late) begin
+                e  = fE;
+                pb = {fN, fV, e ? 1'b1 : fM, e ? 1'b0 : fX, fD, fI, fZ, fC};
+            end else begin
+                e  = sfE;
+                pb = {sfN, sfV, e ? 1'b1 : sfM, e ? 1'b0 : sfX,
+                      sfD, sfI, sfZ, sfC};
+                A <= sA; X <= sX; Y <= sY; xb <= sxb; S <= sS; D <= sD;
+                fN <= sfN; fV <= sfV; fM <= sfM; fX <= sfX;
+                fZ <= sfZ; fC <= sfC; fE <= sfE;
+            end
+            DBR <= sDBR;
+            if (e) begin push_q <= {sPC, pb, 8'h00}; push_n <= 3'd3; end
+            else   begin push_q <= {sPBR, sPC, pb};  push_n <= 3'd4; end
             fI <= 1'b1; fD <= 1'b0; PBR <= 8'h00;
-            vec <= sfE ? 16'hFFF8 : 16'hFFE8;
+            vec <= e ? 16'hFFF8 : 16'hFFE8;
             post_push <= PP_VEC; stk16 <= 1'b0;
             abort_pend <= 1'b0;
             state <= S_PUSH;
@@ -788,22 +911,21 @@ module cpu_65c816 (
             else begin vpa = 1'b1; vda = 1'b1; end
         end
         S_OP1, S_OP2, S_OP3: begin addr = {PBR, PC}; vpa = 1'b1; end
-        S_PTRL:  begin addr = {ptr_bank, tptr};          vda = 1'b1; end
-        S_PTRH:  begin addr = {ptr_bank, tptr + 16'd1};  vda = 1'b1; end
-        S_PTRB:  begin addr = {ptr_bank, tptr + 16'd2};  vda = 1'b1; end
-        S_RDL:   begin addr = taddr;  vda = 1'b1; mlb_n = (d_cls != CL_MW); end
-        S_RDH:   begin addr = taddr1; vda = 1'b1; mlb_n = (d_cls != CL_MW); end
+        S_PTRL, S_PTRH, S_PTRB:
+                 begin addr = {ptr_bank, tptr};  vda = 1'b1; end
+        S_RDL, S_RDH:
+                 begin addr = taddr;  vda = 1'b1; mlb_n = (d_cls != CL_MW); end
         S_WRL:   begin addr = taddr;  we = 1'b1; wdata = stval[7:0];  vda = 1'b1; end
-        S_WRH:   begin addr = taddr1; we = 1'b1; wdata = stval[15:8]; vda = 1'b1; end
-        S_WBL:   begin addr = taddr;  we = 1'b1; wdata = tdata[7:0];  vda = 1'b1; mlb_n = 1'b0; end
-        S_WBH:   begin addr = taddr1; we = 1'b1; wdata = tdata[15:8]; vda = 1'b1; mlb_n = 1'b0; end
+        S_WRH:   begin addr = taddr;  we = 1'b1; wdata = stval[15:8]; vda = 1'b1; end
+        S_WBL:   begin addr = taddr;  we = 1'b1; wdata = rmw_r[7:0];  vda = 1'b1; mlb_n = 1'b0; end
+        S_WBH:   begin addr = taddr;  we = 1'b1; wdata = tdata[15:8]; vda = 1'b1; mlb_n = 1'b0; end
         S_PUSH:  begin addr = sp_push; we = 1'b1; wdata = push_q[31:24]; vda = 1'b1; end
-        S_PULL:  begin addr = sp_pull; vda = 1'b1; end
-        S_VECL:  begin addr = {8'h00, vec};         vda = 1'b1; vpb_n = 1'b0; end
-        S_VECH:  begin addr = {8'h00, vec + 16'd1}; vda = 1'b1; vpb_n = 1'b0; end
+        S_PULL:  begin addr = pa; vda = 1'b1; end
+        S_VECL, S_VECH:
+                 begin addr = {8'h00, vec}; vda = 1'b1; vpb_n = 1'b0; end
         S_MVR:   begin addr = {tmid, X};            vda = 1'b1; end
         S_MVW:   begin addr = {DBR, Y}; we = 1'b1; wdata = tdata[7:0]; vda = 1'b1; end
-        S_WAI, S_STP: vld = 1'b0;
+        S_WAI, S_STP, S_IMP: vld = 1'b0;
         default: ;
         endcase
         // suppress every write of an instruction being aborted (the abort
@@ -845,6 +967,8 @@ module cpu_65c816 (
             ptr_bank <= 8'h00; taddr <= 24'h0; wrap16 <= 1'b0;
             tdata <= 16'h0000; push_q <= 32'h0; push_n <= 3'd0; stk16 <= 1'b0;
             post_push <= PP_FETCH; pull_idx <= 2'd0;
+            taddr_alt <= 24'h0; pa <= 24'h0;
+            xp <= 1'b0; xm <= 16'h0000; snap_late <= 1'b0; lp <= 1'b0;
             irq1 <= 1'b1; irq2 <= 1'b1; nmi1 <= 1'b1; nmi2 <= 1'b1;
             nmi_pend <= 1'b0;
             ab <= 1'b1; abort_pend <= 1'b0;
@@ -868,18 +992,42 @@ module cpu_65c816 (
                 // if both fire on the same cycle).
                 if (abrt) abort_pend <= 1'b1;
 
+                // The registers an execute changes, for the ABORT snapshot,
+                // after a fetch cycle that ran the previous one's execute.
+                if (snap_late) begin
+                    sA <= A; sX <= X; sY <= Y; sxb <= xb; sS <= S; sD <= D; sfE <= fE;
+                    sfN<=fN; sfV<=fV; sfM<=fM; sfX<=fX;
+                    sfD<=fD; sfI<=fI; sfZ<=fZ; sfC<=fC;
+                    snap_late <= 1'b0;
+                end
+
                 case (state)
 
                 //----------------------------------------------------------
                 S_FETCH: begin
                     if (abort_pend) begin
                         // the previous instruction was aborted: restore its
-                        // snapshot and vector through the ABORT handler
+                        // snapshot and vector through the ABORT handler (its
+                        // execute, if one is pending, never happens)
+                        xp <= 1'b0;
                         abort_entry;
+                    end else if ((xp | lp) & (intr | fetch_pull)) begin
+                        // The pending execute first: an interrupt pushes P,
+                        // and a pull's address comes from S, D and E, which
+                        // an implied opcode may change. Fetch again.
+                        if (xp) exec_rd(xm);
+                        if (lp) exec_imp;
+                        xp <= 1'b0; lp <= 1'b0;
                     end else if (intr) begin
                         if (nmi_pend) nmi_pend <= 1'b0;
                         int_entry(PC, 1'b0, int_vec);
                     end else begin
+                        // The pending execute runs as this opcode is latched:
+                        // nothing here reads what it changes.
+                        if (xp) exec_rd(xm);
+                        if (lp) exec_imp;
+                        xp <= 1'b0; lp <= 1'b0;
+                        if (xp | lp) snap_late <= 1'b1;
                         // snapshot the pre-instruction state for ABORT
                         sPC <= PC; sPBR <= PBR;
                         sA <= A; sX <= X; sY <= Y; sS <= S; sD <= D; sDBR <= DBR; sxb <= xb;
@@ -887,67 +1035,6 @@ module cpu_65c816 (
                         sfD<=fD; sfI<=fI; sfZ<=fZ; sfC<=fC; sfE<=fE;
                         PC <= PC + 16'd1;
                         case (rdata)
-                        // ---- flag ops (1 cycle) ----
-                        8'h18: fC <= 1'b0;                       // CLC
-                        8'h38: fC <= 1'b1;                       // SEC
-                        8'h58: fI <= 1'b0;                       // CLI
-                        8'h78: fI <= 1'b1;                       // SEI
-                        8'hB8: fV <= 1'b0;                       // CLV
-                        8'hD8: fD <= 1'b0;                       // CLD
-                        8'hF8: fD <= 1'b1;                       // SED
-                        8'hEA: ;                                 // NOP
-                        // ---- accumulator shifts / inc / dec (1 cycle) ----
-                        8'h0A: rmw_core(OP_ASL, av, 1'b1);
-                        8'h2A: rmw_core(OP_ROL, av, 1'b1);
-                        8'h4A: rmw_core(OP_LSR, av, 1'b1);
-                        8'h6A: rmw_core(OP_ROR, av, 1'b1);
-                        8'h1A: rmw_core(OP_INC, av, 1'b1);
-                        8'h3A: rmw_core(OP_DEC, av, 1'b1);
-                        // ---- transfers (1 cycle) ----
-                        8'hAA: ld_x(A);                          // TAX
-                        8'hA8: ld_y(A);                          // TAY
-                        8'h8A: ld_a(X);                          // TXA
-                        8'h98: ld_a(Y);                          // TYA
-                        8'hBA: ld_x(S);                          // TSX
-                        8'h9A: S <= fE ? {8'h01, X[7:0]} : X;    // TXS
-                        8'h9B: ld_y(X);                          // TXY
-                        8'hBB: ld_x(Y);                          // TYX
-                        8'h1B: S <= fE ? {8'h01, A[7:0]} : A;    // TCS
-                        8'h3B: begin                             // TSC
-                            A <= S; fN <= S[15]; fZ <= (S == 16'h0000);
-                        end
-                        8'h5B: begin                             // TCD
-                            D <= A; fN <= A[15]; fZ <= (A == 16'h0000);
-                        end
-                        8'h7B: begin                             // TDC
-                            A <= D; fN <= D[15]; fZ <= (D == 16'h0000);
-                        end
-                        // ---- index inc/dec (1 cycle) ----
-                        8'hE8: ld_x(X + 16'd1);                  // INX
-                        8'hCA: ld_x(X - 16'd1);                  // DEX
-                        8'hC8: ld_y(Y + 16'd1);                  // INY
-                        8'h88: ld_y(Y - 16'd1);                  // DEY
-                        // ---- XBA / XCE (1 cycle) ----
-                        8'hEB: begin                             // XBA
-                            A <= {A[7:0], A[15:8]};
-                            fN <= A[15]; fZ <= (A[15:8] == 8'h00);
-                        end
-                        8'hFB: begin                             // XCE
-                            fC <= fE; fE <= fC;
-                            if (fC) begin                        // entering emulation
-                                fM <= 1'b1; fX <= 1'b1;
-                                X[15:8] <= 8'h00; Y[15:8] <= 8'h00;
-                                S[15:8] <= 8'h01;
-                            end
-                        end
-                        // ---- pushes ----
-                        8'h08: push8(pbyte(1'b1));               // PHP
-                        8'h0B: push16(D);                        // PHD
-                        8'h48: if (m16) push16(A); else push8(A[7:0]);  // PHA
-                        8'h4B: push8(PBR);                       // PHK
-                        8'h5A: if (x16) push16(Y); else push8(Y[7:0]);  // PHY
-                        8'h8B: push8(DBR);                       // PHB
-                        8'hDA: if (x16) push16(X); else push8(X[7:0]);  // PHX
                         // ---- pulls / returns ----
                         8'h28, 8'h2B, 8'h68, 8'h7A, 8'hAB, 8'hFA,
                         8'h40, 8'h60, 8'h6B: begin
@@ -955,19 +1042,37 @@ module cpu_65c816 (
                             pull_idx <= 2'd0; state <= S_PULL;
                             // The "new" pull instructions PLB/PLD/RTL use the
                             // 16-bit stack in emulation mode
-                            stk16 <= (rdata == 8'h2B) | (rdata == 8'h6B)
-                                                       | (rdata == 8'hAB);
+                            stk16 <= pull16;
+                            pa <= (fE & ~pull16) ? {16'h0001, S[7:0] + 8'd1}
+                                                 : {dbank, S + 16'd1};
                         end
-                        // ---- WAI / STP ----
-                        8'hCB: state <= S_WAI;
-                        8'hDB: state <= S_STP;
-                        // ---- everything else has operand bytes ----
                         default: begin
                             IR <= rdata; {d_mode, d_cls, d_op} <= dec_in;
-                            state <= S_OP1;
+                            if (fetch_local) lp <= 1'b1;         // implied
+                            else if (fetch_setup) state <= S_IMP; // push, WAI, STP
+                            else state <= S_OP1;                  // operands
                         end
                         endcase
                     end
+                end
+
+                //----------------------------------------------------------
+                // A push, WAI or STP, a cycle after its fetch: what it pushes
+                // is then up to date.
+                S_IMP: begin
+                    case (IR)
+                    // ---- pushes ----
+                    8'h08: push8(pbyte(1'b1));               // PHP
+                    8'h0B: push16(D);                        // PHD
+                    8'h48: if (m16) push16(A); else push8(A[7:0]);  // PHA
+                    8'h4B: push8(PBR);                       // PHK
+                    8'h5A: if (x16) push16(Y); else push8(Y[7:0]);  // PHY
+                    8'h8B: push8(DBR);                       // PHB
+                    8'hDA: if (x16) push16(X); else push8(X[7:0]);  // PHX
+                    8'hCB: state <= S_WAI;
+                    8'hDB: state <= S_STP;
+                    default: state <= S_FETCH;
+                    endcase
                 end
 
                 //----------------------------------------------------------
@@ -990,7 +1095,7 @@ module cpu_65c816 (
                     end
                     MD_IMM:
                         if (rd16) begin tlo <= rdata; state <= S_OP2; end
-                        else begin exec_rd({8'h00, rdata}); state <= S_FETCH; end
+                        else begin xm <= {8'h00, rdata}; xp <= 1'b1; state <= S_FETCH; end
                     // Direct-page modes: when E=1 and DL=0 the base offset
                     // (dp + index) wraps within page 0 with high byte = DH;
                     // otherwise it is a 16-bit add in bank 0 (from dbase in
@@ -1071,7 +1176,7 @@ module cpu_65c816 (
                         state <= S_PTRL;
                     end
                     default: case (d_mode)
-                    MD_IMM: begin exec_rd({rdata, tlo}); state <= S_FETCH; end
+                    MD_IMM: begin xm <= {rdata, tlo}; xp <= 1'b1; state <= S_FETCH; end
                     MD_ABS: begin
                         taddr <= {DBR, rdata, tlo}; wrap16 <= 1'b0;
                         state <= dstate_wr ? S_WRL : S_RDL;
@@ -1114,11 +1219,12 @@ module cpu_65c816 (
 
                 //----------------------------------------------------------
                 S_PTRL: begin
-                    tlo <= rdata;
+                    tlo <= rdata; tptr <= tptr + 16'd1;
                     state <= S_PTRH;
                 end
 
                 S_PTRH: begin
+                    tptr <= tptr + 16'd1;
                     case (IR)
                     8'h6C, 8'h7C, 8'hFC:                                   // jumps via pointer
                         begin PC <= {rdata, tlo}; state <= S_FETCH; end
@@ -1154,32 +1260,43 @@ module cpu_65c816 (
                 end
 
                 //----------------------------------------------------------
+                // The data is latched (xm), not used: a read's execute runs
+                // in the next fetch cycle, an RMW's in S_WBL.
                 S_RDL: begin
                     if (rd16) begin
                         tlo <= rdata;
+                        taddr <= taddr1; taddr_alt <= taddr;
                         state <= S_RDH;
                     end else if (d_cls == CL_MW) begin
-                        rmw_core(d_op, {8'h00, rdata}, 1'b0);
+                        xm <= {8'h00, rdata};
                         state <= S_WBL;
                     end else begin
-                        exec_rd({8'h00, rdata});
+                        xm <= {8'h00, rdata}; xp <= 1'b1;
                         state <= S_FETCH;
                     end
                 end
 
                 S_RDH: begin
+                    xm <= {rdata, tlo};
                     if (d_cls == CL_MW) begin
-                        rmw_core(d_op, {rdata, tlo}, 1'b0);
+                        taddr <= taddr_alt; taddr_alt <= taddr;
                         state <= S_WBL;
                     end else begin
-                        exec_rd({rdata, tlo});
+                        xp <= 1'b1;
                         state <= S_FETCH;
                     end
                 end
 
-                S_WBL: state <= rd16 ? S_WBH : S_FETCH;
+                S_WBL: begin
+                    rmw_core(d_op, xm, 1'b0);
+                    if (rd16) begin taddr <= taddr_alt; state <= S_WBH; end
+                    else state <= S_FETCH;
+                end
                 S_WBH: state <= S_FETCH;
-                S_WRL: state <= st16 ? S_WRH : S_FETCH;
+                S_WRL: begin
+                    if (st16) begin taddr <= taddr1; state <= S_WRH; end
+                    else state <= S_FETCH;
+                end
                 S_WRH: state <= S_FETCH;
 
                 //----------------------------------------------------------
@@ -1199,6 +1316,8 @@ module cpu_65c816 (
 
                 S_PULL: begin
                     s_inc;
+                    pa <= (fE & ~stk16) ? {16'h0001, pa[7:0] + 8'd1}
+                                        : {pa[23:16], pa[15:0] + 16'd1};
                     pull_idx <= pull_idx + 2'd1;
                     case (IR)
                     8'h28: begin set_p(rdata); state <= S_FETCH; end       // PLP
@@ -1260,7 +1379,7 @@ module cpu_65c816 (
                 end
 
                 //----------------------------------------------------------
-                S_VECL: begin PC[7:0]  <= rdata; state <= S_VECH;  end
+                S_VECL: begin PC[7:0]  <= rdata; vec <= vec + 16'd1; state <= S_VECH; end
                 S_VECH: begin PC[15:8] <= rdata; state <= S_FETCH; end
 
                 //----------------------------------------------------------

@@ -151,18 +151,20 @@ Z85C80, and the W5100S.
 
 ### Timing
 
-The system clock is 25.2 MHz, so the nearest bus clock is a third of it:
-8.4 MHz, T = 119 ns. No clock goes to the cards, because Intel-bus parts
-don't need one. T is only the unit the bridge counts in.
+The bridge counts in a bus clock T of at least 119 ns (8.4 MHz) and an edge
+gap of at least 40 ns, each a whole number of system clocks. At the 45 MHz
+system clock T is 6 clocks, 133 ns, and the gap is 2 clocks, 44 ns. No
+clock goes to the cards, because Intel-bus parts don't need one. T is only
+the unit the bridge counts in.
 
 | Step | When | Notes |
 |---|---|---|
 | Address, select code, write data out | start of T1 | |
-| Select enable asserted | T1 + 40 ns (one system clock) | The decoder outputs settle before the enable |
-| `RD#` or `WR#` falls | start of T2 | 119 ns of address and select setup |
+| Select enable asserted | T1 + 40 ns or more | The decoder outputs settle before the enable |
+| `RD#` or `WR#` falls | start of T2 | One T of address and select setup |
 | Read data sampled | last system clock of T3 | |
-| Strobe rises | end of T3 | Strobe width 238 ns |
-| Enable released, then address | 40 ns after the strobe | Hold |
+| Strobe rises | end of T3 | Strobe width 2T, 266 ns at 45 MHz |
+| Enable released, then address | 40 ns or more after the strobe | Hold |
 
 A cycle takes about 480 ns from the address going out to the data released (it took 1-2 us with the 6502-style bus); the CPU sees about 560 ns.
 
@@ -364,7 +366,7 @@ timer is on `IRQ`, not `NMI`, so a tick can't interrupt an IRQ handler.
 
 | Clock | Source | Notes |
 |---|---|---|
-| FPGA, 27 MHz | onboard crystal | Built: PLL to 25.2 MHz for the system and the pixel clock |
+| FPGA, 27 MHz | onboard crystal | Built: one PLL to the 45 MHz system clock, another to the 25.2 MHz pixel clock |
 | Z85C80 `PCLK` | oscillator on the carrier | 8 MHz maximum for the parts on hand |
 | Z85C80 `/RTxCA`, `/RTxCB` | the same oscillator | Supplies the baud-rate generators |
 | 82077AA | 24 MHz crystal or oscillator (**Check**) | |
@@ -441,9 +443,9 @@ speaker connector:
 
 * Pins 54-56 double as the FPGA's SSPI configuration pins; `build.tcl` sets
   "use SSPI as regular I/O".
-* I2S from the 25.2 MHz system clock with no PLL: BCLK = 25.2 MHz / 8 =
-  3.15 MHz, 64 bits a frame, 49.2 kHz samples, 24-bit words.
-* The SID clock is a clock enable of 985248 Hz (PAL) from 25.2 MHz.
+* I2S from the system clock with no PLL of its own: BCLK = 45 MHz / 8 =
+  5.625 MHz, 64 bits a frame, 87.9 kHz samples, 24-bit words.
+* The SID clock is a clock enable of 985248 Hz (PAL) from the system clock.
 * **Mono or stereo**, chosen by a control bit. Mono (the reset state) puts
   the mix of both SIDs in both channels, which is what the onboard amplifier
   plays. Stereo puts SID 1 left and SID 2 right.
@@ -502,7 +504,7 @@ first command it gets is CMD0 with chip select low, which puts it in SPI
 mode. **Check** on the board: a floppy DMA transfer with a card in the slot.
 
 4-bit SD mode would need D1 and D2 as well, and there are no pins to move
-DMA to. SPI at 12.6 MHz is over 1 MB/s on the wire; a CPU loop reading a
+DMA to. SPI at 22.5 MHz is over 2 MB/s on the wire; a CPU loop reading a
 block is the limit.
 
 ## ADB

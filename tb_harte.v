@@ -148,6 +148,7 @@ module tb_harte;
             dut.nmi_pend = 1'b0;
             dut.irq1 = 1'b1; dut.irq2 = 1'b1;
             dut.nmi1 = 1'b1; dut.nmi2 = 1'b1;
+            dut.xp = 1'b0; dut.lp = 1'b0; dut.snap_late = 1'b0;
             wn = 0;
 
             // run one instruction
@@ -158,6 +159,14 @@ module tb_harte;
                 if (dut.state == 5'd0 || dut.state == 5'd19
                                       || dut.state == 5'd20)   // FETCH/WAI/STP
                     done = 1;
+            end
+            // A read's or an implied opcode's execute is deferred to the
+            // next fetch cycle (xp, lp): run it, as the bubble the core
+            // inserts before a pull.
+            if (done && dut.state == 5'd0 && (dut.xp || dut.lp)) begin
+                force dut.fetch_pull = 1'b1;
+                @(posedge clk); #1;
+                release dut.fetch_pull;
             end
 
             // compare

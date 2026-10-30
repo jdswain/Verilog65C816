@@ -1,27 +1,35 @@
 //============================================================================
 // timer.v -- the system tick timer, $0450
 //
-// A 16-bit down-counter on the system clock that raises a pending flag every
-// RELOAD clocks, for the operating system's clock tick, and a 32-bit count
-// of those ticks that keeps going while the IRQ is masked or not serviced.
+// A 16-bit down-counter that raises a pending flag every RELOAD counts, for
+// the operating system's clock tick, and a 32-bit count of those ticks that
+// keeps going while the IRQ is masked or not serviced.
+//
+// It counts at 25.2 MHz whatever the system clock: a count is TNUM/TDEN of
+// a system clock, spread evenly (a phase accumulator), so the unit and the
+// software that sets RELOAD stay the same when the system clock changes.
+// TNUM = TDEN counts every clock.
 //
 // Registers (reg_addr[3:0], mirrored):
-//   +0, +1  RELOAD   the period in system clocks, low first; 0 means 65536.
-//                    63000 is 2.5 ms at 25.2 MHz. A write takes effect at
+//   +0, +1  RELOAD   the period in counts (25.2 MHz), low first; 0 means
+//                    65536. 63000 is 2.5 ms. A write takes effect at
 //                    the next tick, or when the timer is enabled.
 //   +2      CTRL     bit 0 EN. Setting it (0 -> 1) starts a period of RELOAD
-//                    clocks; clearing it stops the counter, the tick count
+//                    counts; clearing it stops the counter, the tick count
 //                    stops with it.
 //   +3      STATUS   bit 0 PENDING, set at each tick; write 1 to clear. It
 //                    is the timer's interrupt (the IRQ goes through $0440).
-//   +4, +5  NOW      the down-counter, as latched by a read of +8: clocks
+//   +4, +5  NOW      the down-counter, as latched by a read of +8: counts
 //                    left until the next tick (RELOAD-1 just after a tick).
 //   +8..+B  TICKS    ticks since reset, low first. Reading +8 latches all
 //                    four bytes and NOW, so read +8 first, then +9..+B and
 //                    +4/+5, for a consistent snapshot.
 // Unlisted offsets read 0.
 //============================================================================
-module timer (
+module timer #(
+    parameter integer TNUM = 1,          // a count is TNUM/TDEN of a clock
+    parameter integer TDEN = 1
+) (
     input  wire        clk,
     input  wire        rst_n,
 
@@ -34,28 +42,35 @@ module timer (
 );
     reg [15:0] reload;
     reg        en;
-    reg [15:0] cnt;                      // clocks left in this period, minus 1
+    reg [15:0] cnt;                      // counts left in this period, minus 1
+    reg [15:0] acc;                      // the prescaler's phase
     reg [31:0] ticks;
     reg [31:0] ticks_l;
     reg [15:0] now_l;
 
     wire wr   = cs & we;
-    wire tick = en & (cnt == 16'd0);
+
+    // A count this clock: the phase accumulator wraps past TDEN.
+    wire [16:0] acc_n = {1'b0, acc} + TNUM;
+    wire        adv   = (TNUM == TDEN) | (acc_n >= TDEN);
+    wire tick = en & adv & (cnt == 16'd0);
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             reload  <= 16'd0;
             en      <= 1'b0;
             cnt     <= 16'd0;
+            acc     <= 16'd0;
             ticks   <= 32'd0;
             ticks_l <= 32'd0;
             now_l   <= 16'd0;
             pending <= 1'b0;
         end else begin
+            if (en) acc <= adv ? acc_n - TDEN : acc_n[15:0];
             if (tick) begin
-                cnt   <= reload - 1'b1;      // 0 wraps to 65535: 65536 clocks
+                cnt   <= reload - 1'b1;      // 0 wraps to 65535: 65536 counts
                 ticks <= ticks + 1'b1;
-            end else if (en)
+            end else if (en & adv)
                 cnt   <= cnt - 1'b1;
 
             if (tick) pending <= 1'b1;
@@ -66,7 +81,7 @@ module timer (
                 4'd1: reload[15:8] <= wdata;
                 4'd2: begin
                     en <= wdata[0];
-                    if (wdata[0] & ~en) cnt <= reload - 1'b1;
+                    if (wdata[0] & ~en) begin cnt <= reload - 1'b1; acc <= 16'd0; end
                 end
                 default: ;
             endcase

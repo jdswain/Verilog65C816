@@ -28,7 +28,8 @@ the 5V peripherals on a carrier (SCC, SCSI, floppy, DMA), is specified in
 [`docs/Hardware.md`](../docs/Hardware.md).
 
 ```
-   27 MHz crystal --> rPLL x14/3 = 126 MHz --> /5 = 25.2 MHz (system + pixel clock)
+   27 MHz crystal --> rPLL x5/3 = 45 MHz (system clock: CPU, memory, peripherals)
+                  \-> rPLL x14/3 = 126 MHz --> /5 = 25.2 MHz (pixel clock)
 
      +------------------+        rdy
      |   cpu_65c816     |<---------------------+
@@ -109,7 +110,7 @@ rising one; MOSI idles high.
 | `$02C0` | DATA | write: send the byte (an exchange). Read: the byte last received |
 | `$02C1` | NEXT | read: the byte last received, and send `$FF` to receive the next. Writes are ignored |
 | `$02C2` | STATUS / CONTROL | read: bit 7 busy, bit 0 select. Write: bit 0 select, 1 drives chip select low |
-| `$02C3` | DIVIDER | SCLK = 25.2 MHz / (2 * (DIVIDER + 1)); 31 (393.75 kHz) at reset, for the card's start-up; 0 is 12.6 MHz |
+| `$02C3` | DIVIDER | SCLK = system clock / (2 * (DIVIDER + 1)); at reset the smallest value giving 400 kHz or less (56, 394.7 kHz, at 45 MHz), for the card's start-up; 0 is 22.5 MHz |
 
 The registers repeat through the slot. An exchange takes 16 * (DIVIDER + 1)
 + 1 clocks.
@@ -426,21 +427,24 @@ chip on the card, the SCC's own registers. The rest of `$0440`-`$044F`
 reads 0.
 
 The tick timer (`rtl/timer.v`) is for the operating system's clock. It counts
-system clocks down from RELOAD and sets PENDING at zero, every RELOAD clocks:
+down from RELOAD at 25.2 MHz, whatever the system clock, and sets PENDING at
+zero, every RELOAD counts. (A count is 252/450 of a 45 MHz clock, spread
+evenly by a phase accumulator, so software never needs to know the system
+clock.)
 
 | Address | Register |
 |---|---|
-| `$0450`, `$0451` | RELOAD, the period in system clocks, low first; 0 means 65536. 63000 is 2.5 ms (400 Hz) |
+| `$0450`, `$0451` | RELOAD, the period in counts of 1/25.2 MHz, low first; 0 means 65536. 63000 is 2.5 ms (400 Hz) |
 | `$0452` | CTRL: bit 0 EN. Setting it starts a full period; clearing it stops the timer |
 | `$0453` | STATUS: bit 0 PENDING (write 1 to clear); this is ISTAT bit 0 |
-| `$0454`, `$0455` | NOW: clocks left until the next tick, minus 1, as latched by a read of `$0458` |
+| `$0454`, `$0455` | NOW: counts left until the next tick, minus 1, as latched by a read of `$0458` |
 | `$0458`-`$045B` | TICKS, the ticks since reset, low first |
 
 A RELOAD written while the timer runs takes effect at the next tick. TICKS
 counts every tick whether or not PENDING was cleared, so a system that ran
 with interrupts off for a while can tell how many it missed. Reading
 `$0458` latches the other three bytes of TICKS and NOW, so read `$0458`
-first; `TICKS * RELOAD + RELOAD - 1 - NOW` is then the time in clocks.
+first; `TICKS * RELOAD + RELOAD - 1 - NOW` is then the time in counts.
 
 ```
         lda #<63000
@@ -481,17 +485,19 @@ to a 74HCT138 on the carrier, which makes the eight selects:
 The enable is low only while the code is steady, so the decoder's outputs
 never glitch; on the 53C80 a glitch on `/DACK` would clear its DMA request.
 
-**Timing.** Intel-style `RD#`/`WR#` strobes, counted in a bus clock of three
-system clocks (119 ns, 8.4 MHz); no clock goes to the cards:
+**Timing.** Intel-style `RD#`/`WR#` strobes, counted in a bus clock T of at
+least 119 ns (8.4 MHz) and an edge gap H of at least 40 ns, each a whole
+number of system clocks: at 45 MHz T is 6 clocks (133 ns) and H is 2 (44 ns).
+No clock goes to the cards:
 
 | System clock of the cycle | |
 |---|---|
 | 0 | address, select code and write data out |
-| 1 | select enable low |
-| 3 | `RD#` or `WR#` low (119 ns of setup) |
-| 9 | the strobe rises (238 ns wide); read data is taken as it was just before |
-| 10 | the enable rises (40 ns of hold) |
-| 11 | write data released; the CPU continues |
+| H | select enable low |
+| T | `RD#` or `WR#` low (one T of setup) |
+| 3T | the strobe rises (2T wide); read data is taken as it was just before |
+| 3T + H | the enable rises (40 ns or more of hold) |
+| 3T + H + 1 | write data released; the CPU continues |
 
 The CPU stalls for the whole cycle, about 0.5 us, so a polling loop on a card
 register runs at roughly 1 MHz rather than CPU speed.
@@ -706,7 +712,7 @@ That describes the block RAM and the peripherals. SDRAM accesses go through the
 cache instead, which answers in one cycle when the byte is in the word it is
 already holding and takes longer on a miss -- see [Cache](#cache).
 
-At 25.2 MHz a two-clock access is ~12.6 M bus cycles/s, and this core has no
+At 45 MHz a two-clock access is ~22.5 M bus cycles/s, and this core has no
 dummy cycles, so it gets more done per bus cycle than a real W65C816.
 
 ## Simulating
@@ -1288,8 +1294,8 @@ Control register:
   `$FF` (nothing is connected), and the write-only registers read 0.
 * **Audio.** Each SID gives a 24-bit sample every SID cycle. A one-pole
   lowpass at about 20 kHz takes off most of what would alias, and I2S takes
-  49.2 kHz samples from it: BCLK is 25.2 MHz / 8, and a frame is 64 bits
-  with 24 used in each half. The amplifier plays the left channel.
+  samples from it at the system clock / 512 (87.9 kHz at 45 MHz): BCLK is
+  the system clock / 8, and a frame is 64 bits with 24 used in each half. The amplifier plays the left channel.
 * **Stereo** needs a DAC on the same three pins, which are on the edge
   header too; see the Sound section of `docs/Hardware.md`.
 
@@ -1357,13 +1363,13 @@ Rockwell Forth and the test ROMs (through `rom/scc.asm`) all use it.
   relies on this.
 * **The clock.** Each channel's baud-rate generator counts as the real
   part's does, though it does not set the serial rate: while WR14 bit 0 is
-  set and bit 1 selects PCLK (the 25.2 MHz clock), it counts down from its
+  set and bit 1 selects PCLK (the system clock), it counts down from its
   time constant (WR13:WR12) and reloads it, a zero count every time
   constant + 2 clocks. With WR15 bit 1 and WR1 bit 0 a zero count latches
   the channel's external/status interrupt (RR3 bit 3 A, bit 0 B), held until
-  WR0 Reset Ext/Status Interrupts (`$10`). The board has no other timer:
-  OS16 takes channel B's as its 2.5 ms clock tick (OS16's
-  `doc/OS16_Processes.md`).
+  WR0 Reset Ext/Status Interrupts (`$10`). A time constant is in system
+  clocks, so it depends on the system clock; the tick timer at `$0450`
+  counts at a fixed 25.2 MHz and is the one to use for a clock tick.
 
 `sim/tb_scc.v` checks the emulation against MiniMon's initialisation, with
 channel A looped back:

@@ -1,13 +1,13 @@
 //============================================================================
 // top_tang20k.v -- Tang Nano 20K (GW2AR-18) board wrapper
 //
-// The 27 MHz crystal only feeds the video PLL. The SoC and the video output
-// both run from its 25.2 MHz pixel clock, so one two-clock bus access takes
-// ~79 ns, giving roughly 12.6 M bus cycles/s.
+// The 27 MHz crystal feeds two PLLs: the system clock (sys_pll.v) for the CPU,
+// memory and peripherals, and the 25.2 MHz pixel clock (video_pll.v) for the
+// display. video.v's line buffer is the crossing between them.
 //
 // The serial port goes to the onboard BL616, which presents it to the host as
-// a USB serial device -- no external adapter is needed. 25.2e6/115200 = 218.75,
-// so DIVISOR=219 is 0.11% slow, well inside the ~2% an 8N1 link tolerates.
+// a USB serial device -- no external adapter is needed. DIVISOR is the system
+// clock over 115200, rounded: well inside the ~2% an 8N1 link tolerates.
 //
 // The board's LEDs are common anode, so they light on a logic low; `soc` drives
 // them active high and we invert here.
@@ -75,31 +75,30 @@ module top_tang20k #(
     output wire [2:0]  tmds_d_p,
     output wire [2:0]  tmds_d_n
 );
-    // The SoC runs from the PLL's 25.2 MHz output, not the 27 MHz crystal.
-    // Two changes were needed together: the ROM read path had to be registered
-    // (its tag comparator sat in front of the CPU's ALU), and the clock had to
-    // come down -- at 27 MHz even the registered version closed with under 1%
-    // margin.
-    //
-    // The /5 has to be a CLKDIV primitive; the PLL's own CLKOUTD divider is
-    // even-only and cannot produce 126/5. Getting that wrong runs the whole SoC
-    // at the wrong frequency, whose first symptom is a garbled serial port.
-    //
-    // Video shares this clock, so its line-buffer crossing is degenerate --
-    // still correct, just no longer crossing anything.
-    localparam integer DIVISOR = 219;       // 115200 baud from 25.2 MHz
+    // The system clock: 27 * (FBDIV+1) / (IDIV+1). SYS_HZ must match it --
+    // the serial divisor, the timer's prescaler, SDRAM refresh, the external
+    // bus's strobes, ADB, SD and sound all count from it -- and be a multiple
+    // of 100 kHz, 25.2 MHz or more. tang_nano_20k.sdc has the same ratio.
+    localparam integer SYS_IDIV  = 2;              // /3
+    localparam integer SYS_FBDIV = 4;              // x5: 45 MHz
+    localparam integer SYS_ODIV  = 16;             // VCO 720 MHz
+    localparam integer SYS_HZ    = 45_000_000;
+    localparam integer DIVISOR   = (SYS_HZ + 57_600) / 115_200;
 
     //------------------------------------------------------------------
     // Reset: hold for ~4 ms after configuration, and while S1 is pressed.
     // The button is synchronized before it is allowed to reset anything.
     //------------------------------------------------------------------
-    // Video clocks come first now, because the SoC is clocked from them.
-    wire clk_pix, clk_pix5, pll_locked;
+    wire clk_pix, clk_pix5, vpll_locked;
     video_pll u_vpll (.clk27(clk), .rst_n(1'b1),
                       .clk_pix(clk_pix), .clk_pix5(clk_pix5),
-                      .locked(pll_locked));
+                      .locked(vpll_locked));
 
-    wire sys_clk = clk_pix;
+    wire sys_clk, spll_locked;
+    sys_pll #(.IDIV_SEL(SYS_IDIV), .FBDIV_SEL(SYS_FBDIV), .ODIV_SEL(SYS_ODIV))
+        u_spll (.clk27(clk), .clk(sys_clk), .locked(spll_locked));
+
+    wire pll_locked = vpll_locked & spll_locked;
 
     reg [16:0] por = 17'd0;
     reg [1:0]  btn = 2'b11;
@@ -121,7 +120,13 @@ module top_tang20k #(
     wire rst_n = por_done & pll_locked & ~btn[1];
 
     //------------------------------------------------------------------
-    wire pix_rst_n = rst_n;
+    // The pixel domain's reset: asserted with the system's, released two
+    // pixel clocks later, so its release is synchronous to clk_pix.
+    reg [1:0] pix_rst = 2'b00;
+    always @(posedge clk_pix or negedge rst_n)
+        if (!rst_n) pix_rst <= 2'b00;
+        else        pix_rst <= {pix_rst[0], 1'b1};
+    wire pix_rst_n = pix_rst[1];
 
     wire [7:0] v_r, v_g, v_b;
     wire       v_hs, v_vs, v_de;
@@ -147,6 +152,7 @@ module top_tang20k #(
         .ROM_HEX(ROM_HEX),
         .FONT_HEX(FONT_HEX),
         .DIVISOR(DIVISOR),
+        .SYS_HZ(SYS_HZ),
         .MAP(`ROM_MAP),
         .ROM_BITS(`ROM_BITS_DEF),
         .ROM_BASE(`ROM_BASE_DEF)
