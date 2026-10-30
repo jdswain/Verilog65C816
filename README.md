@@ -85,7 +85,8 @@ commit on the rising edge when `vld & we & rdy`.
 Instruction bytes do not come over the bus one at a time. An 8-byte queue in
 the core fills a word at a time (`rdata32`, flagged `r32`; a memory without
 `r32` gives one byte a fill) in the cycles the core does not need the bus,
-and the opcode and operand states take a byte a cycle from it. A fill holds
+and an instruction takes two cycles from it: the opcode, then all of its
+operand bytes at once. A fill holds
 the bus until `rdy` like any access; a state that does not use the bus keeps
 running meanwhile. A jump empties the queue. Queue fills are the cycles with
 `vpa` high and `vda` low. Self-modifying code is not supported: a store to
@@ -96,12 +97,12 @@ bytes already in the queue does not change them.
 | Instruction type | Cycles | Real W65C816 |
 |---|---|---|
 | Implied register ops (TAX, INX, CLC, XCE, ASL A, ...) | 1 | 2 |
-| Immediate / branch / REP / SEP | 2 (3 if 16-bit imm) | 2-3 |
+| Immediate / branch / REP / SEP | 2 | 2-3 |
 | LDA dp (8-bit / 16-bit) | 3 / 4 | 3 / 4 |
-| LDA abs (8-bit / 16-bit) | 4 / 5 | 4 / 5 |
-| RMW abs (e.g. INC) 8-bit | 5 | 6 |
-| JSR abs / RTS | 5 / 3 | 6 / 6 |
-| Block move (MVN/MVP) | 2 per byte + 3 | 7 per byte |
+| LDA abs (8-bit / 16-bit) | 3 / 4 | 4 / 5 |
+| RMW abs (e.g. INC) 8-bit | 4 | 6 |
+| JSR abs / RTS | 4 / 3 | 6 / 6 |
+| Block move (MVN/MVP) | 2 per byte + 2 | 7 per byte |
 | Interrupt entry (native) | 11 | 8 |
 
 (The opcode fetch is counted in each row; there are no penalty cycles for
@@ -113,8 +114,8 @@ before its opcode can be taken; a data access may also wait behind a queue
 fill. A push takes one cycle more than the table's pattern suggests (a setup
 cycle), and a pull fetched straight after a read or implied instruction waits
 one cycle for its execute. With slow memory (the SoC's cache) the queue wins
-far more than these cost; with zero-wait memory, as in `make run`, it costs
-about 10% more cycles.
+far more than these cost; with zero-wait memory, as in `make run`, it now
+costs nothing (1,410 cycles, against 1,432 without the queue).
 
 ## TomHarte (SingleStepTests) vectors
 

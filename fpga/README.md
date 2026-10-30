@@ -1724,15 +1724,17 @@ wrote.
 **Instruction-queue fills** (the CPU's `vpa` without `vda`) get the whole word
 (`rdata32`) and leave the held word alone, so the data accesses keep theirs.
 
-Measured with `rom/bench.s` (four kernels running from SDRAM, in cycles), the
-CPU's instruction queue and these three changes together:
+Measured with `rom/bench.s` (four kernels running from SDRAM, in cycles): the
+CPU's instruction queue with these three changes ("Queue"), then the core
+taking all of an instruction's operand bytes from the queue in one cycle
+("Operands"):
 
-| Kernel | Before | After | |
-|---|---|---|---|
-| sieve (abs,X, 8-bit flags) | 146,154 | 99,565 | -32% |
-| sum (a JSR per byte) | 49,977 | 33,392 | -33% |
-| copy (16-bit abs,X / abs,Y) | 11,841 | 7,148 | -40% |
-| walk ((dp),Y list) | 87,857 | 50,950 | -42% |
+| Kernel | Before | Queue | Operands | |
+|---|---|---|---|---|
+| sieve (abs,X, 8-bit flags) | 146,154 | 99,565 | 92,529 | -37% |
+| sum (a JSR per byte) | 49,977 | 33,392 | 31,226 | -38% |
+| copy (16-bit abs,X / abs,Y) | 11,841 | 7,148 | 6,854 | -42% |
+| walk ((dp),Y list) | 87,857 | 50,950 | 50,174 | -43% |
 
 ### Keep equality off the carry chain
 
@@ -1839,8 +1841,11 @@ iverilog -g2005 -o /tmp/sdsim rtl/sdram_ctrl.v sim/sdram_model.v sim/tb_sdram.v 
 * **Deeper write buffer.** Done: four entries, merging, see [Cache](#cache).
 * **Eliminate the fetch cycle.** Done in part: instruction bytes come from the
   core's own queue, filled a word at a time in the bus's idle cycles, so no
-  opcode or operand byte waits on memory. The core still takes one byte a
-  cycle; taking a whole instruction from the queue at once is the next step.
+  opcode or operand byte waits on memory. An instruction takes two cycles
+  from the queue, the opcode and then all its operands; folding the operands
+  into the opcode's cycle would save one more, but the address would then be
+  formed before the previous instruction's deferred execute (an `INX` before
+  an `abs,X`), and the timing margin at 45 MHz is under 2%.
 * **Split I/D caches.** The architecture notes argued against them because of
   self-modifying code; that constraint has since been dropped, which removes the
   objection. Instruction fetch is 84% of traffic and purely sequential, so an

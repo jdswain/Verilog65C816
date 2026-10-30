@@ -15,8 +15,8 @@
 //
 // Instruction bytes come from an 8-byte queue, never straight off the bus.
 // The queue fills a 32-bit word at a time (rdata32) in cycles the core does
-// not use the bus, while the opcode and operand states take a byte a cycle
-// from its head; a jump empties it. Self-modifying code is not supported:
+// not use the bus. An instruction takes two cycles from its head, the opcode
+// and then all its operand bytes at once (S_OPS); a jump empties it. Self-modifying code is not supported:
 // a store to bytes already queued does not change them.
 //
 // Bus protocol (simple synchronous SRAM-style):
@@ -104,9 +104,7 @@ module cpu_65c816 (
     //------------------------------------------------------------------
     localparam [4:0]
         S_FETCH = 5'd0,   // opcode fetch (+ folded implied execute)
-        S_OP1   = 5'd1,   // operand byte 1
-        S_OP2   = 5'd2,   // operand byte 2
-        S_OP3   = 5'd3,   // operand byte 3
+        S_OPS   = 5'd1,   // the operand bytes, all at once
         S_PTRL  = 5'd4,   // indirect pointer low
         S_PTRH  = 5'd5,   // indirect pointer high
         S_PTRB  = 5'd6,   // indirect pointer bank
@@ -192,7 +190,7 @@ module cpu_65c816 (
     reg        fbusy;         // a fetch holds the bus until rdy
     reg        fdrop;         // ... and its bytes are stale (a jump since)
     // per-cycle flags from the state machine to the queue logic
-    reg        take;          // a byte taken from the head
+    reg [1:0]  take;          // bytes taken from the head
     reg        jmp;           // PC written out of sequence: empty the queue
     reg [15:0] jpc;
     reg [7:0]  jbank;         // and the bank to fetch from
@@ -240,6 +238,7 @@ module cpu_65c816 (
     reg [4:0] d_mode;
     reg [2:0] d_cls;
     reg [4:0] d_op;
+    reg [1:0] d_len;          // operand bytes (an immediate's, 8-bit)
 
     function [12:0] dec(input [7:0] op);
         reg [4:0] dm;
@@ -249,9 +248,9 @@ module cpu_65c816 (
         dm = MD_NON; dc = CL_SPC; dp = OP_NOP;
         case (op)
         // 0x
-        8'h00: ;                                                       // BRK (S_OP1 special)
+        8'h00: ;                                                       // BRK (S_OPS special)
         8'h01: begin dm=MD_IDX; dc=CL_RD; dp=OP_ORA; end
-        8'h02: ;                                                       // COP (S_OP1 special)
+        8'h02: ;                                                       // COP (S_OPS special)
         8'h03: begin dm=MD_SR;  dc=CL_RD; dp=OP_ORA; end
         8'h04: begin dm=MD_DP;  dc=CL_MW; dp=OP_TSB; end
         8'h05: begin dm=MD_DP;  dc=CL_RD; dp=OP_ORA; end
@@ -481,6 +480,22 @@ module cpu_65c816 (
     // would build a separate 256-way decoder each time.
     wire [12:0] dec_in = dec(qb);
 
+    // The operand bytes the opcode being fetched takes (an immediate's
+    // second byte, which hangs on m or x, is added in S_OPS).
+    reg [1:0] len_in;
+    always @* begin
+        case (qb)
+        8'h44, 8'h54, 8'hF4: len_in = 2'd2;             // MVP/MVN, PEA
+        8'h00, 8'h02, 8'hD4: len_in = 2'd1;             // BRK, COP, PEI
+        default: case (dec_in[12:8])
+            MD_ABS, MD_ABX, MD_ABY, MD_RLL,
+            MD_IAB, MD_IAX, MD_IAL: len_in = 2'd2;
+            MD_ABL, MD_ALX:         len_in = 2'd3;
+            default:                len_in = 2'd1;
+            endcase
+        endcase
+    end
+
     // The opcode being fetched: implied (executed in the next cycle, lp),
     // a push, WAI or STP (S_IMP), or a pull (S_PULL).
     reg fetch_local, fetch_setup;
@@ -547,7 +562,11 @@ module cpu_65c816 (
     wire [23:0] taddr1   = wrap16 ? {taddr[23:16], taddr[15:0] + 16'd1}
                                   : taddr + 24'd1;
     wire [23:0] sp_push  = (fE & ~stk16) ? {16'h0001, S[7:0]} : {dbank, S};
-    wire [15:0] pcn      = PC + 16'd1;   // PC after the current operand byte
+    wire [15:0] pcn      = PC + 16'd1;
+    // S_OPS: the operand bytes and the address past the instruction
+    wire [1:0]  olen     = d_len + {1'b0, (d_mode == MD_IMM) & rd16};
+    wire [15:0] pce      = PC + {14'd0, olen};
+    wire [7:0]  b1 = q[7:0], b2 = q[15:8], b3 = q[23:16];
 
     // P register byte (brkbit: value of bit4 in emulation mode)
     function [7:0] pbyte(input brkbit);
@@ -952,7 +971,7 @@ module cpu_65c816 (
         if (fbusy) begin
             vld = 1'b1; vpa = 1'b1;           // an instruction-queue fill
         end else case (state)
-        S_FETCH, S_OP1, S_OP2, S_OP3: ;      // from the queue: no bus
+        S_FETCH, S_OPS: ;                    // from the queue: no bus
         S_PTRL, S_PTRH, S_PTRB:
                  begin vld = 1'b1; addr = {ptr_bank, tptr};  vda = 1'b1; end
         S_RDL, S_RDH:
@@ -1013,7 +1032,7 @@ module cpu_65c816 (
             A <= 16'h0000; X <= 16'h0000; Y <= 16'h0000;
             S <= 16'h01FF; D <= 16'h0000; DBR <= 8'h00; PBR <= 8'h00;
             PC <= 16'h0000; IR <= 8'h00; xb <= 1'b0; sxb <= 1'b0;
-            {d_mode, d_cls, d_op} <= dec(8'h00);
+            {d_mode, d_cls, d_op} <= dec(8'h00); d_len <= 2'd1;
             tlo <= 8'h00; tmid <= 8'h00; tptr <= 16'h0000;
             ptr_bank <= 8'h00; taddr <= 24'h0; wrap16 <= 1'b0;
             tdata <= 16'h0000; push_q <= 32'h0; push_n <= 3'd0; stk16 <= 1'b0;
@@ -1039,7 +1058,7 @@ module cpu_65c816 (
             // abort synchronizer
             ab <= abort_n;
 
-            take = 1'b0; jmp = 1'b0; jpc = PC; jbank = PBR;
+            take = 2'd0; jmp = 1'b0; jpc = PC; jbank = PBR;
 
             if (cstep) begin
                 // Latch a recognized abort; the abort sequence in S_FETCH
@@ -1088,7 +1107,7 @@ module cpu_65c816 (
                         sA <= A; sX <= X; sY <= Y; sS <= S; sD <= D; sDBR <= DBR; sxb <= xb;
                         sfN<=fN; sfV<=fV; sfM<=fM; sfX<=fX;
                         sfD<=fD; sfI<=fI; sfZ<=fZ; sfC<=fC; sfE<=fE;
-                        PC <= PC + 16'd1; take = 1'b1;
+                        PC <= PC + 16'd1; take = 2'd1;
                         case (qb)
                         // ---- pulls / returns ----
                         8'h28, 8'h2B, 8'h68, 8'h7A, 8'hAB, 8'hFA,
@@ -1103,9 +1122,10 @@ module cpu_65c816 (
                         end
                         default: begin
                             IR <= qb; {d_mode, d_cls, d_op} <= dec_in;
+                            d_len <= len_in;
                             if (fetch_local) lp <= 1'b1;         // implied
                             else if (fetch_setup) state <= S_IMP; // push, WAI, STP
-                            else state <= S_OP1;                  // operands
+                            else state <= S_OPS;                  // operands
                         end
                         endcase
                     end
@@ -1131,144 +1151,125 @@ module cpu_65c816 (
                 end
 
                 //----------------------------------------------------------
-                S_OP1: if (qn != 4'd0) begin
-                    PC <= PC + 16'd1; take = 1'b1;
+                // The operand bytes, taken together once all are queued: b1-b3
+                // from the head, PC at b1, pce past the instruction.
+                S_OPS: if (qn >= {2'd0, olen}) begin
+                    PC <= pce; take = olen;
                     case (IR)
-                    8'h00: int_entry(pcn, 1'b1, fE ? 16'hFFFE : 16'hFFE6); // BRK
-                    8'h02: int_entry(pcn, 1'b1, fE ? 16'hFFF4 : 16'hFFE4); // COP
-                    8'h44, 8'h54: begin DBR <= qb; state <= S_OP2; end  // MVP/MVN dest bank
-                    8'h62, 8'hF4, 8'h82: begin tlo <= qb; state <= S_OP2; end // PER/PEA/BRL
+                    8'h00: int_entry(pce, 1'b1, fE ? 16'hFFFE : 16'hFFE6); // BRK
+                    8'h02: int_entry(pce, 1'b1, fE ? 16'hFFF4 : 16'hFFE4); // COP
+                    8'h44, 8'h54: begin                                    // MVP/MVN
+                        DBR <= b1; tmid <= b2; state <= S_MVR;             // dest, src bank
+                    end
+                    8'h62: push16(pce + {b2, b1});                         // PER
+                    8'hF4: push16({b2, b1});                               // PEA
+                    8'h82: begin jump(pce + {b2, b1}); state <= S_FETCH; end // BRL
                     8'hD4: begin                                           // PEI
-                        tptr <= dpw ? {D[15:8], qb} : dbase + {8'h00, qb};
+                        tptr <= dpw ? {D[15:8], b1} : dbase + {8'h00, b1};
                         ptr_bank <= dbank;
                         state <= S_PTRL;
                     end
+                    8'h20: begin                                           // JSR abs
+                        push_q <= {pcn, 16'h0}; push_n <= 3'd2; stk16 <= 1'b0;
+                        post_push <= PP_FETCH;
+                        jump({b2, b1});
+                        state <= S_PUSH;
+                    end
+                    8'hFC: begin                                           // JSR (abs,X)
+                        push_q <= {pcn, 16'h0}; push_n <= 3'd2; stk16 <= 1'b0;
+                        post_push <= PP_PTR;
+                        tptr <= {b2, b1} + X; ptr_bank <= PBR;
+                        state <= S_PUSH;
+                    end
+                    8'h4C: begin jump({b2, b1}); state <= S_FETCH; end     // JMP abs
+                    8'h6C, 8'hDC: begin                                    // JMP (abs) / JML [abs]
+                        tptr <= {b2, b1}; ptr_bank <= 8'h00;
+                        state <= S_PTRL;
+                    end
+                    8'h7C: begin                                           // JMP (abs,X)
+                        tptr <= {b2, b1} + X; ptr_bank <= PBR;
+                        state <= S_PTRL;
+                    end
+                    8'h5C: begin jumpl(b3, {b2, b1}); state <= S_FETCH; end // JML long
+                    8'h22: begin                                           // JSL long
+                        push_q <= {PBR, pce - 16'd1, 8'h00}; push_n <= 3'd3; stk16 <= 1'b1;
+                        post_push <= PP_FETCH;
+                        jumpl(b3, {b2, b1});
+                        state <= S_PUSH;
+                    end
                     default: case (d_mode)
                     MD_REL: begin
-                        if (btake) jump(pcn + {{8{qb[7]}}, qb});
+                        if (btake) jump(pce + {{8{b1[7]}}, b1});
                         state <= S_FETCH;
                     end
-                    MD_IMM:
-                        if (rd16) begin tlo <= qb; state <= S_OP2; end
-                        else begin xm <= {8'h00, qb}; xp <= 1'b1; state <= S_FETCH; end
+                    MD_IMM: begin
+                        xm <= rd16 ? {b2, b1} : {8'h00, b1}; xp <= 1'b1;
+                        state <= S_FETCH;
+                    end
                     // Direct-page modes: when E=1 and DL=0 the base offset
                     // (dp + index) wraps within page 0 with high byte = DH;
                     // otherwise it is a 16-bit add in bank 0 (from dbase in
                     // dbank, in banked mode). The word/pointer upper bytes
                     // are always fetched at base+1 (16-bit).
                     MD_DP: begin
-                        taddr <= dpw ? {8'h00, D[15:8], qb}
-                                     : {dbank, dbase + {8'h00, qb}};
+                        taddr <= dpw ? {8'h00, D[15:8], b1}
+                                     : {dbank, dbase + {8'h00, b1}};
                         wrap16 <= 1'b1;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
                     MD_DPX: begin
-                        taddr <= dpw ? {8'h00, D[15:8], qb + X[7:0]}
-                                     : {dbank, dbase + {8'h00, qb} + X};
+                        taddr <= dpw ? {8'h00, D[15:8], b1 + X[7:0]}
+                                     : {dbank, dbase + {8'h00, b1} + X};
                         wrap16 <= 1'b1;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
                     MD_DPY: begin
-                        taddr <= dpw ? {8'h00, D[15:8], qb + Y[7:0]}
-                                     : {dbank, dbase + {8'h00, qb} + Y};
+                        taddr <= dpw ? {8'h00, D[15:8], b1 + Y[7:0]}
+                                     : {dbank, dbase + {8'h00, b1} + Y};
                         wrap16 <= 1'b1;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
                     MD_SR: begin
-                        taddr <= {dbank, S + {8'h00, qb}};
+                        taddr <= {dbank, S + {8'h00, b1}};
                         wrap16 <= 1'b1;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
                     MD_IDX: begin
-                        tptr <= dpw ? {D[15:8], qb + X[7:0]}
-                                    : dbase + {8'h00, qb} + X;
+                        tptr <= dpw ? {D[15:8], b1 + X[7:0]}
+                                    : dbase + {8'h00, b1} + X;
                         ptr_bank <= dbank;
                         state <= S_PTRL;
                     end
                     MD_IDP, MD_IDY, MD_IDL, MD_ILY: begin
-                        tptr <= dpw ? {D[15:8], qb}
-                                    : dbase + {8'h00, qb};
+                        tptr <= dpw ? {D[15:8], b1}
+                                    : dbase + {8'h00, b1};
                         ptr_bank <= dbank;
                         state <= S_PTRL;
                     end
                     MD_SRY: begin
-                        tptr <= S + {8'h00, qb}; ptr_bank <= dbank;
+                        tptr <= S + {8'h00, b1}; ptr_bank <= dbank;
                         state <= S_PTRL;
                     end
-                    default: begin tlo <= qb; state <= S_OP2; end
-                    // MD_ABS/ABX/ABY/ABL/ALX/IAB/IAX/IAL collect more bytes
-                    endcase
-                    endcase
-                end
-
-                //----------------------------------------------------------
-                S_OP2: if (qn != 4'd0) begin
-                    PC <= PC + 16'd1; take = 1'b1;
-                    case (IR)
-                    8'h44, 8'h54: begin tmid <= qb; state <= S_MVR; end // src bank
-                    8'h62: push16(pcn + {qb, tlo});                     // PER
-                    8'hF4: push16({qb, tlo});                           // PEA
-                    8'h82: begin jump(pcn + {qb, tlo}); state <= S_FETCH; end // BRL
-                    8'h20: begin                                           // JSR abs
-                        push_q <= {PC, 16'h0}; push_n <= 3'd2; stk16 <= 1'b0;
-                        post_push <= PP_FETCH;
-                        jump({qb, tlo});
-                        state <= S_PUSH;
-                    end
-                    8'hFC: begin                                           // JSR (abs,X)
-                        push_q <= {PC, 16'h0}; push_n <= 3'd2; stk16 <= 1'b0;
-                        post_push <= PP_PTR;
-                        tptr <= {qb, tlo} + X; ptr_bank <= PBR;
-                        state <= S_PUSH;
-                    end
-                    8'h4C: begin jump({qb, tlo}); state <= S_FETCH; end // JMP abs
-                    8'h6C, 8'hDC: begin                                    // JMP (abs) / JML [abs]
-                        tptr <= {qb, tlo}; ptr_bank <= 8'h00;
-                        state <= S_PTRL;
-                    end
-                    8'h7C: begin                                           // JMP (abs,X)
-                        tptr <= {qb, tlo} + X; ptr_bank <= PBR;
-                        state <= S_PTRL;
-                    end
-                    default: case (d_mode)
-                    MD_IMM: begin xm <= {qb, tlo}; xp <= 1'b1; state <= S_FETCH; end
                     MD_ABS: begin
-                        taddr <= {DBR, qb, tlo}; wrap16 <= 1'b0;
+                        taddr <= {DBR, b2, b1}; wrap16 <= 1'b0;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
                     MD_ABX: begin
-                        taddr <= {DBR, qb, tlo} + {8'h00, X}; wrap16 <= 1'b0;
+                        taddr <= {DBR, b2, b1} + {8'h00, X}; wrap16 <= 1'b0;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
                     MD_ABY: begin
-                        taddr <= {DBR, qb, tlo} + {8'h00, Y}; wrap16 <= 1'b0;
+                        taddr <= {DBR, b2, b1} + {8'h00, Y}; wrap16 <= 1'b0;
                         state <= dstate_wr ? S_WRL : S_RDL;
-                    end
-                    default: begin tmid <= qb; state <= S_OP3; end // ABL/ALX
-                    endcase
-                    endcase
-                end
-
-                //----------------------------------------------------------
-                S_OP3: if (qn != 4'd0) begin
-                    PC <= PC + 16'd1; take = 1'b1;
-                    case (IR)
-                    8'h5C: begin                                           // JML long
-                        jumpl(qb, {tmid, tlo}); state <= S_FETCH;
-                    end
-                    8'h22: begin                                           // JSL long
-                        push_q <= {PBR, PC, 8'h00}; push_n <= 3'd3; stk16 <= 1'b1;
-                        post_push <= PP_FETCH;
-                        jumpl(qb, {tmid, tlo});
-                        state <= S_PUSH;
                     end
                     default: begin                                         // ABL / ALX
                         taddr <= (d_mode == MD_ALX)
-                                 ? {qb, tmid, tlo} + {8'h00, X}
-                                 : {qb, tmid, tlo};
+                                 ? {b3, b2, b1} + {8'h00, X}
+                                 : {b3, b2, b1};
                         wrap16 <= 1'b0;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
+                    endcase
                     endcase
                 end
 
@@ -1443,7 +1444,7 @@ module cpu_65c816 (
                     state <= S_MVW;
                 end
 
-                // Internal block-move loop: after FETCH/OP1/OP2 set up the
+                // Internal block-move loop: after FETCH/OPS set up the
                 // banks, spin MVR/MVW at 2 cycles/byte without re-fetching the
                 // instruction. PC already points past the MVN/MVP.
                 //   - count exhausted (C wrapped to $FFFF): fall through to the
@@ -1500,8 +1501,8 @@ module cpu_65c816 (
                 reg [2:0]  nf;
                 reg [31:0] fw;
                 reg        land, st_n, st_f;
-                qq = take ? {8'h00, q[63:8]} : q;
-                qc = qn - {3'd0, take};
+                qq = q >> {take, 3'b000};
+                qc = qn - {2'd0, take};
                 if (r32) begin
                     fw = rdata32 >> {faddr[1:0], 3'b000};
                     nf = 3'd4 - {1'b0, faddr[1:0]};
