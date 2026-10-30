@@ -25,6 +25,8 @@ module tb_cpu;
 
     reg [7:0] mem [0:131071];          // banks $00-$01
     wire [7:0] rdata = mem[addr[16:0]];
+    wire [16:0] wa = {addr[16:2], 2'b00};
+    wire [31:0] rdata32 = {mem[wa | 17'd3], mem[wa | 17'd2], mem[wa | 17'd1], mem[wa]};
 
     reg irq_line = 1'b1;
     reg nmi_line = 1'b1;
@@ -37,6 +39,8 @@ module tb_cpu;
         .addr    (addr),
         .wdata   (wdata),
         .rdata   (rdata),
+        .rdata32 (rdata32),
+        .r32     (1'b1),
         .we      (we),
         .vld     (vld),
         .rdy     (1'b1),

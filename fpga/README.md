@@ -1709,12 +1709,30 @@ That margin was at 27 MHz. The system clock has since come down to 25.2 MHz,
 and the compare has been taken out of the read-data path altogether without
 giving up the single-cycle hit -- see [Synthesis](#synthesis-gowin-eda).
 
-Reads are at the structural floor for this handshake: one cycle to read the
-array, one to compare and answer, one for the CPU to see the ack and present
-the next address. Writes are unchanged because they are port-bound, not
-latency-bound -- consecutive stores queue behind each other. **A deeper write
-buffer is the next worthwhile optimisation**; a single posted write absorbs an
-isolated store but not a burst of them.
+**Lookups take two cycles; stores are buffered.** A lookup reads the arrays
+in the cycle the request is seen and answers in the next: the ack is
+combinational from the registered tag compare, and the data comes from the
+register the arrays were read into (`data_q`). A store is answered the same
+way, into a **four-entry write buffer** that drains to SDRAM whenever the port
+is free; a store to the word of the newest entry not yet sent merges into it,
+so the two bytes of a 16-bit store usually cost one SDRAM write. A line fill
+waits for the buffer to empty, so SDRAM is up to date before it is read, and
+`wr_busy` stays high while anything is buffered: the DMA engine and the
+blitter start no memory transaction until then, so they read what the CPU
+wrote.
+
+**Instruction-queue fills** (the CPU's `vpa` without `vda`) get the whole word
+(`rdata32`) and leave the held word alone, so the data accesses keep theirs.
+
+Measured with `rom/bench.s` (four kernels running from SDRAM, in cycles), the
+CPU's instruction queue and these three changes together:
+
+| Kernel | Before | After | |
+|---|---|---|---|
+| sieve (abs,X, 8-bit flags) | 146,154 | 99,565 | -32% |
+| sum (a JSR per byte) | 49,977 | 33,392 | -33% |
+| copy (16-bit abs,X / abs,Y) | 11,841 | 7,148 | -40% |
+| walk ((dp),Y list) | 87,857 | 50,950 | -42% |
 
 ### Keep equality off the carry chain
 
@@ -1749,7 +1767,9 @@ Two things about it are unlike the rest of the design:
 * **It runs on the inverted clock.** `O_sdram_clk` is `~clk`, so the SDRAM's
   rising edge lands in the middle of our cycle and both directions get setup
   and hold. This is the cheap equivalent of the 180-degree PLL output other
-  designs use, and at 25.2 MHz there is enormous margin.
+  designs use. At 45 MHz the read path has about half a period less the
+  part's access time; memtest passes on the board, but a faster clock would
+  need a phase-shifted PLL output instead.
 
 Every access is issued with **auto-precharge**, so the controller never tracks
 open rows and refresh can go out whenever it is idle. Addresses are mapped
@@ -1816,15 +1836,11 @@ iverilog -g2005 -o /tmp/sdsim rtl/sdram_ctrl.v sim/sdram_model.v sim/tb_sdram.v 
 
 ### Performance
 
-* **Deeper write buffer.** Stores cost 3.03 cycles against reads at 2.03: they
-  are port-bound, not latency-bound, and consecutive stores queue. One posted
-  write absorbs an isolated store but not a burst.
-* **Eliminate the fetch cycle.** The 6502 hides its opcode fetch in the previous
-  instruction's last cycle, so `IR` and the control signals are ready before the
-  instruction starts. This core cannot: it has no dead cycles to hide a fetch
-  in. `rtl/prefetch.v` (32-bit, tested, **not integrated**) is the fetch source
-  that would make it possible, and it only pays off as part of this change --
-  on throughput alone the cache's held word already beats it.
+* **Deeper write buffer.** Done: four entries, merging, see [Cache](#cache).
+* **Eliminate the fetch cycle.** Done in part: instruction bytes come from the
+  core's own queue, filled a word at a time in the bus's idle cycles, so no
+  opcode or operand byte waits on memory. The core still takes one byte a
+  cycle; taking a whole instruction from the queue at once is the next step.
 * **Split I/D caches.** The architecture notes argued against them because of
   self-modifying code; that constraint has since been dropped, which removes the
   objection. Instruction fetch is 84% of traffic and purely sequential, so an

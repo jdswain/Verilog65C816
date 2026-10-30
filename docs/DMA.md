@@ -217,9 +217,9 @@ the signal yet.
 
 **The cache.** The engine's writes go past the cache, which snoops port 2
 already: `inv_valid`/`inv_addr` come from the multiplexed port instead of
-the blitter's. The prefetch queue doesn't snoop, as for the blitter: code
-read from disk is only stale if it is within two words of the PC, and a
-jump to it flushes the queue (`prefetch.v`).
+the blitter's. The CPU's instruction queue doesn't snoop, as for the
+blitter: code read from disk is only stale if it is within eight bytes of
+the PC, and a jump to it empties the queue (`cpu_65c816.v`).
 
 ### `mm_mux`: sharing port 2
 

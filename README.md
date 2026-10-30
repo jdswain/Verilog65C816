@@ -64,6 +64,8 @@ Simple SRAM-style synchronous bus, 24-bit address / 8-bit data:
 |------|-----|-------------|
 | `addr[23:0]`  | out | bank:address |
 | `rdata[7:0]`  | in  | read data, sampled on posedge clk when `rdy` |
+| `rdata32[31:0]` | in | the aligned 32-bit word holding `addr`, when `r32` |
+| `r32`         | in  | this read also returns the whole word (`rdata32`): the instruction queue takes all four bytes |
 | `wdata[7:0]`  | out | write data |
 | `we`          | out | 1 = write cycle |
 | `vld`         | out | a bus cycle is in progress |
@@ -80,6 +82,15 @@ and samples `rdata` on the same rising edge. For registered (block-RAM style)
 memory, hold `rdy` low for one cycle per access, or add a bridge. Writes
 commit on the rising edge when `vld & we & rdy`.
 
+Instruction bytes do not come over the bus one at a time. An 8-byte queue in
+the core fills a word at a time (`rdata32`, flagged `r32`; a memory without
+`r32` gives one byte a fill) in the cycles the core does not need the bus,
+and the opcode and operand states take a byte a cycle from it. A fill holds
+the bus until `rdy` like any access; a state that does not use the bus keeps
+running meanwhile. A jump empties the queue. Queue fills are the cycles with
+`vpa` high and `vda` low. Self-modifying code is not supported: a store to
+bytes already in the queue does not change them.
+
 ## Cycle counts (rdy held high)
 
 | Instruction type | Cycles | Real W65C816 |
@@ -95,6 +106,15 @@ commit on the rising edge when `vld & we & rdy`.
 
 (The opcode fetch is counted in each row; there are no penalty cycles for
 page/bank crossing, indexing, or `D` misalignment.)
+
+These assume the instruction queue already holds the bytes. A jump, branch
+taken, return or interrupt empties it, and the target's word is then fetched
+before its opcode can be taken; a data access may also wait behind a queue
+fill. A push takes one cycle more than the table's pattern suggests (a setup
+cycle), and a pull fetched straight after a read or implied instruction waits
+one cycle for its execute. With slow memory (the SoC's cache) the queue wins
+far more than these cost; with zero-wait memory, as in `make run`, it costs
+about 10% more cycles.
 
 ## TomHarte (SingleStepTests) vectors
 

@@ -25,6 +25,7 @@ module mm_mux (
 
     // ---- master B: the blitter ----
     input  wire        b_req,
+    input  wire        b_hold,     // B may not start a transaction (CPU store queued)
     input  wire        b_we,
     input  wire [20:0] b_addr,
     input  wire [31:0] b_wdata,
@@ -57,7 +58,8 @@ module mm_mux (
     // Before a grant, the master that would get it; after, the one that has it.
     wire use_d = held ? held_d : d_req;
 
-    assign p_req   = ~gap & (use_d ? d_req : b_req);
+    wire   b_go    = b_req & (held | ~b_hold);
+    assign p_req   = ~gap & (use_d ? d_req : b_go);
     assign p_we    = use_d ? d_we    : b_we;
     assign p_addr  = use_d ? d_addr  : b_addr;
     assign p_wdata = use_d ? d_wdata : b_wdata;
@@ -75,7 +77,7 @@ module mm_mux (
             gap <= p_done;
             if (p_done)
                 held <= 1'b0;
-            else if (!held && !gap && (d_req || b_req)) begin
+            else if (!held && !gap && (d_req || b_go)) begin
                 held   <= 1'b1;
                 held_d <= d_req;
             end

@@ -13,14 +13,24 @@
 // implied opcode's (lp); an RMW's result is formed in its write cycle. Only a
 // pull fetched behind such an execute, and an interrupt, wait a cycle for it.
 //
+// Instruction bytes come from an 8-byte queue, never straight off the bus.
+// The queue fills a 32-bit word at a time (rdata32) in cycles the core does
+// not use the bus, while the opcode and operand states take a byte a cycle
+// from its head; a jump empties it. Self-modifying code is not supported:
+// a store to bytes already queued does not change them.
+//
 // Bus protocol (simple synchronous SRAM-style):
 //   - When `vld` is high a bus cycle is in progress at `addr`.
 //   - Read  (we=0): memory must drive `rdata` combinationally in the same
 //     cycle (async read); the core samples it on the rising clock edge when
-//     rdy=1. For synchronous memories, hold `rdy` low for one cycle.
+//     rdy=1. For synchronous memories, hold `rdy` low for one cycle. A
+//     memory that can also drive the whole aligned word on `rdata32` raises
+//     `r32`; the instruction queue then takes all of it (else one byte).
+//     Queue fills are flagged VPA=1, VDA=0.
 //   - Write (we=1): `addr`/`wdata` are valid; the system commits the write
 //     on the rising edge when rdy=1.
-//   - `rdy` low freezes the core (wait states).
+//   - `rdy` low holds the bus cycle (wait states). A state that does not
+//     use the bus keeps running while a queue fill waits.
 //
 // Interrupts: RES (rst_n), NMI (falling edge), IRQ (level). ABORT is not
 // implemented.
@@ -49,6 +59,8 @@ module cpu_65c816 (
     output reg  [23:0] addr,
     output reg  [7:0]  wdata,
     input  wire [7:0]  rdata,
+    input  wire [31:0] rdata32, // the aligned word holding addr, when r32
+    input  wire        r32,     // this read returns the whole word (rdata32)
     output reg         we,      // 1 = write cycle
     output reg         vld,     // bus cycle valid
     input  wire        rdy,     // memory ready (wait-state when low)
@@ -166,6 +178,25 @@ module cpu_65c816 (
     reg        lp;            // an implied opcode's execute is pending (IR)
     reg [15:0] xm;
     reg        snap_late;     // the ABORT snapshot's registers, a cycle late
+
+    // Instruction queue. Opcode and operand bytes come from here, never
+    // from the bus: a fetcher fills it a word at a time in the cycles the
+    // core does not use the bus, and the core takes bytes from its head.
+    // q[7:0] is the byte at PC; fa = PC + qn is the next byte to fetch.
+    // A jump empties it (and drops a fetch in flight). Self-modifying code
+    // is not supported: bytes already queued are not refetched.
+    reg [63:0] q;
+    reg [3:0]  qn;            // bytes queued, 0-8
+    reg [15:0] fa;            // offset in PBR of the next byte to fetch
+    reg [23:0] faddr;         // the fetch in flight's address
+    reg        fbusy;         // a fetch holds the bus until rdy
+    reg        fdrop;         // ... and its bytes are stale (a jump since)
+    // per-cycle flags from the state machine to the queue logic
+    reg        take;          // a byte taken from the head
+    reg        jmp;           // PC written out of sequence: empty the queue
+    reg [15:0] jpc;
+    reg [7:0]  jbank;         // and the bank to fetch from
+    wire [7:0] qb = q[7:0];
 
     localparam [1:0] PP_FETCH=2'd0, PP_VEC=2'd1, PP_PTR=2'd2;
 
@@ -448,14 +479,14 @@ module cpu_65c816 (
     // Decode the byte arriving on the bus, ONCE. A Verilog function is inlined
     // at every call site, so calling dec(rdata) from each place that loads IR
     // would build a separate 256-way decoder each time.
-    wire [12:0] dec_in = dec(rdata);
+    wire [12:0] dec_in = dec(qb);
 
     // The opcode being fetched: implied (executed in the next cycle, lp),
     // a push, WAI or STP (S_IMP), or a pull (S_PULL).
     reg fetch_local, fetch_setup;
     always @* begin
         fetch_local = 1'b0; fetch_setup = 1'b0;
-        case (rdata)
+        case (qb)
         8'h18, 8'h38, 8'h58, 8'h78, 8'hB8, 8'hD8, 8'hF8, 8'hEA,
         8'h0A, 8'h2A, 8'h4A, 8'h6A, 8'h1A, 8'h3A,
         8'hAA, 8'hA8, 8'h8A, 8'h98, 8'hBA, 8'h9A, 8'h9B, 8'hBB,
@@ -466,12 +497,12 @@ module cpu_65c816 (
         default: ;
         endcase
     end
-    wire fetch_pull = (rdata == 8'h28) | (rdata == 8'h2B) | (rdata == 8'h68) |
-                      (rdata == 8'h7A) | (rdata == 8'hAB) | (rdata == 8'hFA) |
-                      (rdata == 8'h40) | (rdata == 8'h60) | (rdata == 8'h6B);
+    wire fetch_pull = (qb == 8'h28) | (qb == 8'h2B) | (qb == 8'h68) |
+                      (qb == 8'h7A) | (qb == 8'hAB) | (qb == 8'hFA) |
+                      (qb == 8'h40) | (qb == 8'h60) | (qb == 8'h6B);
 
     // PLB, PLD and RTL use the 16-bit stack in emulation mode
-    wire pull16 = (rdata == 8'h2B) | (rdata == 8'h6B) | (rdata == 8'hAB);
+    wire pull16 = (qb == 8'h2B) | (qb == 8'h6B) | (qb == 8'hAB);
 
     // operand width for reads/RMW; stores have their own
     wire op_xwide = (d_op==OP_LDX)||(d_op==OP_LDY)||(d_op==OP_CPX)||
@@ -823,6 +854,20 @@ module cpu_65c816 (
         end
     endtask
 
+    // PC out of sequence: the queue empties (see the queue logic)
+    task jump(input [15:0] v);
+        begin
+            PC <= v; jmp = 1'b1; jpc = v; jbank = PBR;
+        end
+    endtask
+
+    // ... and PBR with it (JML, JSL)
+    task jumpl(input [7:0] b, input [15:0] v);
+        begin
+            PBR <= b; PC <= v; jmp = 1'b1; jpc = v; jbank = b;
+        end
+    endtask
+
     // queue a push, shortest path to S_PUSH
     task push8(input [7:0] v);
         begin
@@ -899,33 +944,29 @@ module cpu_65c816 (
     // Bus outputs (combinational)
     //------------------------------------------------------------------
     always @* begin
-        vld = 1'b1; we = 1'b0; addr = {PBR, PC}; wdata = 8'h00;
+        vld = 1'b0; we = 1'b0; addr = faddr; wdata = 8'h00;
         // status pins: VPA/VDA classify the cycle (00=internal, 10=program,
         // 01=data, 11=opcode fetch); VPB low on vector pulls; MLB low on the
         // read+write of a read-modify-write.
         vpa = 1'b0; vda = 1'b0; vpb_n = 1'b1; mlb_n = 1'b1;
-        case (state)
-        S_FETCH: begin
-            addr = {PBR, PC};
-            if (intr | abort_pend) vld = 1'b0;   // interrupt/abort: internal
-            else begin vpa = 1'b1; vda = 1'b1; end
-        end
-        S_OP1, S_OP2, S_OP3: begin addr = {PBR, PC}; vpa = 1'b1; end
+        if (fbusy) begin
+            vld = 1'b1; vpa = 1'b1;           // an instruction-queue fill
+        end else case (state)
+        S_FETCH, S_OP1, S_OP2, S_OP3: ;      // from the queue: no bus
         S_PTRL, S_PTRH, S_PTRB:
-                 begin addr = {ptr_bank, tptr};  vda = 1'b1; end
+                 begin vld = 1'b1; addr = {ptr_bank, tptr};  vda = 1'b1; end
         S_RDL, S_RDH:
-                 begin addr = taddr;  vda = 1'b1; mlb_n = (d_cls != CL_MW); end
-        S_WRL:   begin addr = taddr;  we = 1'b1; wdata = stval[7:0];  vda = 1'b1; end
-        S_WRH:   begin addr = taddr;  we = 1'b1; wdata = stval[15:8]; vda = 1'b1; end
-        S_WBL:   begin addr = taddr;  we = 1'b1; wdata = rmw_r[7:0];  vda = 1'b1; mlb_n = 1'b0; end
-        S_WBH:   begin addr = taddr;  we = 1'b1; wdata = tdata[15:8]; vda = 1'b1; mlb_n = 1'b0; end
-        S_PUSH:  begin addr = sp_push; we = 1'b1; wdata = push_q[31:24]; vda = 1'b1; end
-        S_PULL:  begin addr = pa; vda = 1'b1; end
+                 begin vld = 1'b1; addr = taddr;  vda = 1'b1; mlb_n = (d_cls != CL_MW); end
+        S_WRL:   begin vld = 1'b1; addr = taddr;  we = 1'b1; wdata = stval[7:0];  vda = 1'b1; end
+        S_WRH:   begin vld = 1'b1; addr = taddr;  we = 1'b1; wdata = stval[15:8]; vda = 1'b1; end
+        S_WBL:   begin vld = 1'b1; addr = taddr;  we = 1'b1; wdata = rmw_r[7:0];  vda = 1'b1; mlb_n = 1'b0; end
+        S_WBH:   begin vld = 1'b1; addr = taddr;  we = 1'b1; wdata = tdata[15:8]; vda = 1'b1; mlb_n = 1'b0; end
+        S_PUSH:  begin vld = 1'b1; addr = sp_push; we = 1'b1; wdata = push_q[31:24]; vda = 1'b1; end
+        S_PULL:  begin vld = 1'b1; addr = pa; vda = 1'b1; end
         S_VECL, S_VECH:
-                 begin addr = {8'h00, vec}; vda = 1'b1; vpb_n = 1'b0; end
-        S_MVR:   begin addr = {tmid, X};            vda = 1'b1; end
-        S_MVW:   begin addr = {DBR, Y}; we = 1'b1; wdata = tdata[7:0]; vda = 1'b1; end
-        S_WAI, S_STP, S_IMP: vld = 1'b0;
+                 begin vld = 1'b1; addr = {8'h00, vec}; vda = 1'b1; vpb_n = 1'b0; end
+        S_MVR:   begin vld = 1'b1; addr = {tmid, X};            vda = 1'b1; end
+        S_MVW:   begin vld = 1'b1; addr = {DBR, Y}; we = 1'b1; wdata = tdata[7:0]; vda = 1'b1; end
         default: ;
         endcase
         // suppress every write of an instruction being aborted (the abort
@@ -935,7 +976,17 @@ module cpu_65c816 (
         if (abort_pend | abrt) we = 1'b0;
     end
 
-    wire step = rdy | ~vld;                  // bus-cycle (or internal) advance
+    wire step = rdy | ~vld;                  // a bus cycle ends (or none)
+
+    // The core's states that use the bus. One waits while a queue fill
+    // holds the bus, then for its own rdy; every other state advances each
+    // cycle, a fill in flight or not.
+    wire needs_bus = (state == S_PTRL) | (state == S_PTRH) | (state == S_PTRB) |
+                     (state == S_RDL)  | (state == S_RDH)  | (state == S_WRL)  |
+                     (state == S_WRH)  | (state == S_WBL)  | (state == S_WBH)  |
+                     (state == S_PUSH) | (state == S_PULL) | (state == S_VECL) |
+                     (state == S_VECH) | (state == S_MVR)  | (state == S_MVW);
+    wire cstep = ~needs_bus | (~fbusy & rdy);
     wire dstate_wr = (d_cls == CL_WR);
     wire [15:0] int_vec = nmi_pend ? (fE ? 16'hFFFA : 16'hFFEA)
                                    : (fE ? 16'hFFFE : 16'hFFEE);
@@ -968,6 +1019,8 @@ module cpu_65c816 (
             tdata <= 16'h0000; push_q <= 32'h0; push_n <= 3'd0; stk16 <= 1'b0;
             post_push <= PP_FETCH; pull_idx <= 2'd0;
             taddr_alt <= 24'h0; pa <= 24'h0;
+            q <= 64'h0; qn <= 4'd0; fa <= 16'h0000; faddr <= 24'h0;
+            fbusy <= 1'b0; fdrop <= 1'b0;
             xp <= 1'b0; xm <= 16'h0000; snap_late <= 1'b0; lp <= 1'b0;
             irq1 <= 1'b1; irq2 <= 1'b1; nmi1 <= 1'b1; nmi2 <= 1'b1;
             nmi_pend <= 1'b0;
@@ -986,7 +1039,9 @@ module cpu_65c816 (
             // abort synchronizer
             ab <= abort_n;
 
-            if (step) begin
+            take = 1'b0; jmp = 1'b0; jpc = PC; jbank = PBR;
+
+            if (cstep) begin
                 // Latch a recognized abort; the abort sequence in S_FETCH
                 // clears it (that clear is later in source order, so it wins
                 // if both fire on the same cycle).
@@ -1011,7 +1066,7 @@ module cpu_65c816 (
                         // execute, if one is pending, never happens)
                         xp <= 1'b0;
                         abort_entry;
-                    end else if ((xp | lp) & (intr | fetch_pull)) begin
+                    end else if ((xp | lp) & (intr | fetch_pull | (qn == 4'd0))) begin
                         // The pending execute first: an interrupt pushes P,
                         // and a pull's address comes from S, D and E, which
                         // an implied opcode may change. Fetch again.
@@ -1021,7 +1076,7 @@ module cpu_65c816 (
                     end else if (intr) begin
                         if (nmi_pend) nmi_pend <= 1'b0;
                         int_entry(PC, 1'b0, int_vec);
-                    end else begin
+                    end else if (qn != 4'd0) begin
                         // The pending execute runs as this opcode is latched:
                         // nothing here reads what it changes.
                         if (xp) exec_rd(xm);
@@ -1033,12 +1088,12 @@ module cpu_65c816 (
                         sA <= A; sX <= X; sY <= Y; sS <= S; sD <= D; sDBR <= DBR; sxb <= xb;
                         sfN<=fN; sfV<=fV; sfM<=fM; sfX<=fX;
                         sfD<=fD; sfI<=fI; sfZ<=fZ; sfC<=fC; sfE<=fE;
-                        PC <= PC + 16'd1;
-                        case (rdata)
+                        PC <= PC + 16'd1; take = 1'b1;
+                        case (qb)
                         // ---- pulls / returns ----
                         8'h28, 8'h2B, 8'h68, 8'h7A, 8'hAB, 8'hFA,
                         8'h40, 8'h60, 8'h6B: begin
-                            IR <= rdata; {d_mode, d_cls, d_op} <= dec_in;
+                            IR <= qb; {d_mode, d_cls, d_op} <= dec_in;
                             pull_idx <= 2'd0; state <= S_PULL;
                             // The "new" pull instructions PLB/PLD/RTL use the
                             // 16-bit stack in emulation mode
@@ -1047,7 +1102,7 @@ module cpu_65c816 (
                                                  : {dbank, S + 16'd1};
                         end
                         default: begin
-                            IR <= rdata; {d_mode, d_cls, d_op} <= dec_in;
+                            IR <= qb; {d_mode, d_cls, d_op} <= dec_in;
                             if (fetch_local) lp <= 1'b1;         // implied
                             else if (fetch_setup) state <= S_IMP; // push, WAI, STP
                             else state <= S_OP1;                  // operands
@@ -1076,141 +1131,141 @@ module cpu_65c816 (
                 end
 
                 //----------------------------------------------------------
-                S_OP1: begin
-                    PC <= PC + 16'd1;
+                S_OP1: if (qn != 4'd0) begin
+                    PC <= PC + 16'd1; take = 1'b1;
                     case (IR)
                     8'h00: int_entry(pcn, 1'b1, fE ? 16'hFFFE : 16'hFFE6); // BRK
                     8'h02: int_entry(pcn, 1'b1, fE ? 16'hFFF4 : 16'hFFE4); // COP
-                    8'h44, 8'h54: begin DBR <= rdata; state <= S_OP2; end  // MVP/MVN dest bank
-                    8'h62, 8'hF4, 8'h82: begin tlo <= rdata; state <= S_OP2; end // PER/PEA/BRL
+                    8'h44, 8'h54: begin DBR <= qb; state <= S_OP2; end  // MVP/MVN dest bank
+                    8'h62, 8'hF4, 8'h82: begin tlo <= qb; state <= S_OP2; end // PER/PEA/BRL
                     8'hD4: begin                                           // PEI
-                        tptr <= dpw ? {D[15:8], rdata} : dbase + {8'h00, rdata};
+                        tptr <= dpw ? {D[15:8], qb} : dbase + {8'h00, qb};
                         ptr_bank <= dbank;
                         state <= S_PTRL;
                     end
                     default: case (d_mode)
                     MD_REL: begin
-                        PC <= btake ? pcn + {{8{rdata[7]}}, rdata} : pcn;
+                        if (btake) jump(pcn + {{8{qb[7]}}, qb});
                         state <= S_FETCH;
                     end
                     MD_IMM:
-                        if (rd16) begin tlo <= rdata; state <= S_OP2; end
-                        else begin xm <= {8'h00, rdata}; xp <= 1'b1; state <= S_FETCH; end
+                        if (rd16) begin tlo <= qb; state <= S_OP2; end
+                        else begin xm <= {8'h00, qb}; xp <= 1'b1; state <= S_FETCH; end
                     // Direct-page modes: when E=1 and DL=0 the base offset
                     // (dp + index) wraps within page 0 with high byte = DH;
                     // otherwise it is a 16-bit add in bank 0 (from dbase in
                     // dbank, in banked mode). The word/pointer upper bytes
                     // are always fetched at base+1 (16-bit).
                     MD_DP: begin
-                        taddr <= dpw ? {8'h00, D[15:8], rdata}
-                                     : {dbank, dbase + {8'h00, rdata}};
+                        taddr <= dpw ? {8'h00, D[15:8], qb}
+                                     : {dbank, dbase + {8'h00, qb}};
                         wrap16 <= 1'b1;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
                     MD_DPX: begin
-                        taddr <= dpw ? {8'h00, D[15:8], rdata + X[7:0]}
-                                     : {dbank, dbase + {8'h00, rdata} + X};
+                        taddr <= dpw ? {8'h00, D[15:8], qb + X[7:0]}
+                                     : {dbank, dbase + {8'h00, qb} + X};
                         wrap16 <= 1'b1;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
                     MD_DPY: begin
-                        taddr <= dpw ? {8'h00, D[15:8], rdata + Y[7:0]}
-                                     : {dbank, dbase + {8'h00, rdata} + Y};
+                        taddr <= dpw ? {8'h00, D[15:8], qb + Y[7:0]}
+                                     : {dbank, dbase + {8'h00, qb} + Y};
                         wrap16 <= 1'b1;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
                     MD_SR: begin
-                        taddr <= {dbank, S + {8'h00, rdata}};
+                        taddr <= {dbank, S + {8'h00, qb}};
                         wrap16 <= 1'b1;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
                     MD_IDX: begin
-                        tptr <= dpw ? {D[15:8], rdata + X[7:0]}
-                                    : dbase + {8'h00, rdata} + X;
+                        tptr <= dpw ? {D[15:8], qb + X[7:0]}
+                                    : dbase + {8'h00, qb} + X;
                         ptr_bank <= dbank;
                         state <= S_PTRL;
                     end
                     MD_IDP, MD_IDY, MD_IDL, MD_ILY: begin
-                        tptr <= dpw ? {D[15:8], rdata}
-                                    : dbase + {8'h00, rdata};
+                        tptr <= dpw ? {D[15:8], qb}
+                                    : dbase + {8'h00, qb};
                         ptr_bank <= dbank;
                         state <= S_PTRL;
                     end
                     MD_SRY: begin
-                        tptr <= S + {8'h00, rdata}; ptr_bank <= dbank;
+                        tptr <= S + {8'h00, qb}; ptr_bank <= dbank;
                         state <= S_PTRL;
                     end
-                    default: begin tlo <= rdata; state <= S_OP2; end
+                    default: begin tlo <= qb; state <= S_OP2; end
                     // MD_ABS/ABX/ABY/ABL/ALX/IAB/IAX/IAL collect more bytes
                     endcase
                     endcase
                 end
 
                 //----------------------------------------------------------
-                S_OP2: begin
-                    PC <= PC + 16'd1;
+                S_OP2: if (qn != 4'd0) begin
+                    PC <= PC + 16'd1; take = 1'b1;
                     case (IR)
-                    8'h44, 8'h54: begin tmid <= rdata; state <= S_MVR; end // src bank
-                    8'h62: push16(pcn + {rdata, tlo});                     // PER
-                    8'hF4: push16({rdata, tlo});                           // PEA
-                    8'h82: begin PC <= pcn + {rdata, tlo}; state <= S_FETCH; end // BRL
+                    8'h44, 8'h54: begin tmid <= qb; state <= S_MVR; end // src bank
+                    8'h62: push16(pcn + {qb, tlo});                     // PER
+                    8'hF4: push16({qb, tlo});                           // PEA
+                    8'h82: begin jump(pcn + {qb, tlo}); state <= S_FETCH; end // BRL
                     8'h20: begin                                           // JSR abs
                         push_q <= {PC, 16'h0}; push_n <= 3'd2; stk16 <= 1'b0;
                         post_push <= PP_FETCH;
-                        PC <= {rdata, tlo};
+                        jump({qb, tlo});
                         state <= S_PUSH;
                     end
                     8'hFC: begin                                           // JSR (abs,X)
                         push_q <= {PC, 16'h0}; push_n <= 3'd2; stk16 <= 1'b0;
                         post_push <= PP_PTR;
-                        tptr <= {rdata, tlo} + X; ptr_bank <= PBR;
+                        tptr <= {qb, tlo} + X; ptr_bank <= PBR;
                         state <= S_PUSH;
                     end
-                    8'h4C: begin PC <= {rdata, tlo}; state <= S_FETCH; end // JMP abs
+                    8'h4C: begin jump({qb, tlo}); state <= S_FETCH; end // JMP abs
                     8'h6C, 8'hDC: begin                                    // JMP (abs) / JML [abs]
-                        tptr <= {rdata, tlo}; ptr_bank <= 8'h00;
+                        tptr <= {qb, tlo}; ptr_bank <= 8'h00;
                         state <= S_PTRL;
                     end
                     8'h7C: begin                                           // JMP (abs,X)
-                        tptr <= {rdata, tlo} + X; ptr_bank <= PBR;
+                        tptr <= {qb, tlo} + X; ptr_bank <= PBR;
                         state <= S_PTRL;
                     end
                     default: case (d_mode)
-                    MD_IMM: begin xm <= {rdata, tlo}; xp <= 1'b1; state <= S_FETCH; end
+                    MD_IMM: begin xm <= {qb, tlo}; xp <= 1'b1; state <= S_FETCH; end
                     MD_ABS: begin
-                        taddr <= {DBR, rdata, tlo}; wrap16 <= 1'b0;
+                        taddr <= {DBR, qb, tlo}; wrap16 <= 1'b0;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
                     MD_ABX: begin
-                        taddr <= {DBR, rdata, tlo} + {8'h00, X}; wrap16 <= 1'b0;
+                        taddr <= {DBR, qb, tlo} + {8'h00, X}; wrap16 <= 1'b0;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
                     MD_ABY: begin
-                        taddr <= {DBR, rdata, tlo} + {8'h00, Y}; wrap16 <= 1'b0;
+                        taddr <= {DBR, qb, tlo} + {8'h00, Y}; wrap16 <= 1'b0;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
-                    default: begin tmid <= rdata; state <= S_OP3; end // ABL/ALX
+                    default: begin tmid <= qb; state <= S_OP3; end // ABL/ALX
                     endcase
                     endcase
                 end
 
                 //----------------------------------------------------------
-                S_OP3: begin
-                    PC <= PC + 16'd1;
+                S_OP3: if (qn != 4'd0) begin
+                    PC <= PC + 16'd1; take = 1'b1;
                     case (IR)
                     8'h5C: begin                                           // JML long
-                        PBR <= rdata; PC <= {tmid, tlo}; state <= S_FETCH;
+                        jumpl(qb, {tmid, tlo}); state <= S_FETCH;
                     end
                     8'h22: begin                                           // JSL long
                         push_q <= {PBR, PC, 8'h00}; push_n <= 3'd3; stk16 <= 1'b1;
                         post_push <= PP_FETCH;
-                        PBR <= rdata; PC <= {tmid, tlo};
+                        jumpl(qb, {tmid, tlo});
                         state <= S_PUSH;
                     end
                     default: begin                                         // ABL / ALX
                         taddr <= (d_mode == MD_ALX)
-                                 ? {rdata, tmid, tlo} + {8'h00, X}
-                                 : {rdata, tmid, tlo};
+                                 ? {qb, tmid, tlo} + {8'h00, X}
+                                 : {qb, tmid, tlo};
                         wrap16 <= 1'b0;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
@@ -1227,7 +1282,7 @@ module cpu_65c816 (
                     tptr <= tptr + 16'd1;
                     case (IR)
                     8'h6C, 8'h7C, 8'hFC:                                   // jumps via pointer
-                        begin PC <= {rdata, tlo}; state <= S_FETCH; end
+                        begin jump({rdata, tlo}); state <= S_FETCH; end
                     8'hD4: push16({rdata, tlo});                           // PEI
                     8'hDC: begin tmid <= rdata; state <= S_PTRB; end       // JML [abs]
                     default: case (d_mode)
@@ -1247,7 +1302,7 @@ module cpu_65c816 (
                 S_PTRB: begin
                     case (IR)
                     8'hDC: begin                                           // JML [abs]
-                        PC <= {tmid, tlo}; PBR <= rdata; state <= S_FETCH;
+                        jump({tmid, tlo}); PBR <= rdata; state <= S_FETCH;
                     end
                     default: begin                                         // IDL / ILY
                         taddr <= (d_mode == MD_ILY)
@@ -1353,12 +1408,12 @@ module cpu_65c816 (
                     8'h60:                                                 // RTS
                         if (pull_idx == 2'd0) tlo <= rdata;
                         else begin
-                            PC <= {rdata, tlo} + 16'd1; state <= S_FETCH;
+                            jump({rdata, tlo} + 16'd1); state <= S_FETCH;
                         end
                     8'h6B:                                                 // RTL
                         case (pull_idx)
                         2'd0: tlo <= rdata;
-                        2'd1: PC <= {rdata, tlo} + 16'd1;
+                        2'd1: jump({rdata, tlo} + 16'd1);
                         default: begin
                             PBR <= rdata;
                             if (fE) S[15:8] <= 8'h01;       // restore page 1
@@ -1370,7 +1425,7 @@ module cpu_65c816 (
                         2'd0: set_p(rdata);
                         2'd1: tlo <= rdata;
                         2'd2: begin
-                            PC <= {rdata, tlo};
+                            jump({rdata, tlo});
                             if (fE) state <= S_FETCH;
                         end
                         default: begin PBR <= rdata; state <= S_FETCH; end
@@ -1379,8 +1434,8 @@ module cpu_65c816 (
                 end
 
                 //----------------------------------------------------------
-                S_VECL: begin PC[7:0]  <= rdata; vec <= vec + 16'd1; state <= S_VECH; end
-                S_VECH: begin PC[15:8] <= rdata; state <= S_FETCH; end
+                S_VECL: begin tlo <= rdata; vec <= vec + 16'd1; state <= S_VECH; end
+                S_VECH: begin jump({rdata, tlo}); state <= S_FETCH; end
 
                 //----------------------------------------------------------
                 S_MVR: begin
@@ -1408,7 +1463,7 @@ module cpu_65c816 (
                     if (A == 16'h0000)
                         state <= S_FETCH;
                     else if (intr) begin
-                        PC <= PC - 16'd3;
+                        jump(PC - 16'd3);
                         state <= S_FETCH;
                     end else
                         state <= S_MVR;
@@ -1429,6 +1484,62 @@ module cpu_65c816 (
 
                 default: state <= S_FETCH;
                 endcase
+            end
+
+            //--------------------------------------------------------------
+            // The instruction queue: the byte taken this cycle, the fill
+            // landing this cycle, a jump, and the next fill. A fill starts
+            // only in a cycle the core is off the bus, when a whole word
+            // will fit, and its address is latched: the bus holds it to rdy.
+            begin : queue_logic
+                // Both outcomes are worked out without rdy -- the fill
+                // landing this cycle or not -- and rdy, which arrives late
+                // (through the cache's compare), only picks one.
+                reg [63:0] qq, qf;
+                reg [3:0]  qc, qcf;
+                reg [2:0]  nf;
+                reg [31:0] fw;
+                reg        land, st_n, st_f;
+                qq = take ? {8'h00, q[63:8]} : q;
+                qc = qn - {3'd0, take};
+                if (r32) begin
+                    fw = rdata32 >> {faddr[1:0], 3'b000};
+                    nf = 3'd4 - {1'b0, faddr[1:0]};
+                end else begin
+                    fw = {24'h0, rdata};
+                    nf = 3'd1;
+                end
+                qf  = qq | ({32'h0, fw} << {qc, 3'b000});
+                qcf = qc + {1'b0, nf};
+                land = fbusy & rdy & ~fdrop & ~jmp;  // a fill lands now
+                if (jmp) begin
+                    q <= 64'h0; qn <= 4'd0; fa <= jpc;
+                end else if (land) begin
+                    q <= qf; qn <= qcf; fa <= fa + {13'd0, nf};
+                end else begin
+                    q <= qq; qn <= qc;
+                end
+                if (fbusy & rdy) begin
+                    fbusy <= 1'b0; fdrop <= 1'b0;
+                end else if (fbusy & jmp)
+                    fdrop <= 1'b1;
+                // The next fill: once the bus is free (no fill, or this one
+                // ending), in a cycle the core is off it, when a word will
+                // fit. (A jump out of a bus state -- a return, a vector, a
+                // pointer -- may change PBR a cycle later, but the next state
+                // then starts no fill until it is off the bus.)
+                st_n = ~needs_bus & ~((state == S_FETCH) & (intr | abort_pend));
+                st_f = st_n & (jmp | (qcf <= 4'd4));   // after a fill lands
+                st_n = st_n & (jmp | (qc  <= 4'd4));   // with none landing
+                if (fbusy ? (rdy & (fdrop | jmp ? st_n : st_f)) : st_n) begin
+                    fbusy <= 1'b1; fdrop <= 1'b0;
+                    if (jmp) begin
+                        faddr <= {jbank, jpc}; fa <= jpc;
+                    end else if (fbusy & ~fdrop)
+                        faddr <= {PBR, fa + {13'd0, nf}};
+                    else
+                        faddr <= {PBR, fa};
+                end
             end
         end
     end

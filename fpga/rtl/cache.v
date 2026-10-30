@@ -68,9 +68,10 @@ module cache #(
     input  wire [22:0] addr,
     input  wire [7:0]  wdata,
     output wire [7:0]  rdata,
-    output wire [31:0] rdata32,      // the whole held word
+    output wire [31:0] rdata32,      // the whole word of the read, on ack
     input  wire        req,          // held high for the access
     input  wire        we,
+    input  wire        ifetch,       // an instruction-queue fill: leave the held word
     output wire        ack,          // one cycle; rdata valid here
 
     // ---- SDRAM side (port 1 of sdram_burst) ----
@@ -150,8 +151,6 @@ module cache #(
     // cycle. That puts the tag+index+word compare in front of the CPU's
     // ready input -- but, since the change described below, no longer in front
     // of its read data and ALU.
-    assign ack     = ack_r | fast;
-    assign rdata32 = hold_data;
 
     // The data is selected by `ack_r`, a register, and NOT by `fast`. Selected
     // by `fast`, the 21-bit held-word compare sat in front of the read data and
@@ -166,23 +165,35 @@ module cache #(
     // When `ack_r` is high the access finishing is the slow path's, and
     // `rdata_r` is its answer -- even if the word it just loaded into the
     // hold register makes `fast` true in the same cycle.
-    assign rdata   = ack_r ? rdata_r : pick(hold_data, a_byte);
+    // (rdata, ack and rdata32 are assigned below, after the state they use.)
 
     reg [TAG_BITS:0] tag_q;
     reg [31:0]       data_q;
     reg [IDX_BITS-1:0] idx_r;
     reg [TAG_BITS-1:0] tag_r;
     reg [1:0]        word_r, byte_r;
-    reg              we_r;
+    reg              we_r, if_r;
     reg [7:0]        wdata_r;
 
     wire hit = tag_q[TAG_BITS] & (tag_q[TAG_BITS-1:0] == tag_r);
 
-    // write-through buffer (one entry)
-    reg        wb_full;
-    reg [20:0] wb_addr;
-    reg [31:0] wb_data;
-    reg [3:0]  wb_mask;
+    reg       m_busy;             // an SDRAM transaction is in flight
+
+    // Write buffer: four posted stores, oldest first. A store to the word of
+    // the newest entry not yet sent merges into it (the two bytes of a 16-bit
+    // store, mostly). A line fill waits until it is empty, so SDRAM is up to
+    // date before it is read; a read hit needs no SDRAM and never waits.
+    reg [20:0] wf_a [0:3];
+    reg [31:0] wf_d [0:3];
+    reg [3:0]  wf_m [0:3];
+    reg [1:0]  wf_rp, wf_wp;
+    reg [2:0]  wf_cnt;
+    reg        wf_push, wf_pop;          // this cycle (blocking, in the always)
+    wire       wf_full  = (wf_cnt == 3'd4);
+    wire       wf_drain = ~m_busy & (wf_cnt != 3'd0);     // the head goes now
+    wire [1:0] wf_last  = wf_wp - 2'd1;
+    wire       wf_merge = (wf_cnt != 3'd0) & ~(wf_drain & (wf_cnt == 3'd1)) &
+                          (wf_a[wf_last] == {tag_r, idx_r, word_r});
 
     localparam [3:0] S_IDLE  = 4'd0, S_CHECK = 4'd1, S_WAIT  = 4'd2,
                      S_FILL  = 4'd3, S_FILL_DONE = 4'd4, S_SERVE = 4'd5,
@@ -218,8 +229,36 @@ module cache #(
     wire fill_ending = (state == S_FILL) & m_done;
     wire inv_act     = inv_pend & inv_rd & ~inv_valid & ~fill_ending;
     wire inv_cur     = inv_act & cur_any & (cur_idx == inv_idx) & (cur_tag == inv_tag);
-    reg       m_busy;             // an SDRAM transaction is in flight
-    assign wr_busy = m_busy & m_we;
+    assign wr_busy = (m_busy & m_we) | (wf_cnt != 3'd0);
+
+    // A lookup that hits, or a write the SDRAM port can post at once, ends in
+    // S_CHECK itself: its ack is combinational from the registered tag
+    // compare, and its data comes from data_q. A lookup costs two cycles.
+    wire chk     = (state == S_CHECK);
+    wire chk_ok  = chk & (we_r ? ~wf_full : hit);
+    assign ack     = ack_r | fast | chk_ok;
+    assign rdata32 = (chk | ack_r) ? data_q : hold_data;
+
+    assign rdata   = ack_r ? rdata_r :
+                     chk   ? pick(data_q, byte_r) : pick(hold_data, a_byte);
+
+    // The store in tag_r/idx_r/word_r/byte_r/wdata_r into the write buffer:
+    // merged into the newest entry if it is the same word and not being
+    // sent this cycle, else a new entry (the caller checked there is room).
+    task wf_store;
+        begin
+            if (wf_merge) begin
+                wf_d[wf_last][{byte_r, 3'b000} +: 8] <= wdata_r;
+                wf_m[wf_last] <= wf_m[wf_last] | (4'b0001 << byte_r);
+            end else begin
+                wf_a[wf_wp] <= {tag_r, idx_r, word_r};
+                wf_d[wf_wp] <= {4{wdata_r}};
+                wf_m[wf_wp] <= (4'b0001 << byte_r);
+                wf_wp       <= wf_wp + 2'd1;
+                wf_push = 1'b1;
+            end
+        end
+    endtask
 
     // byte lane helpers
     function [7:0] pick(input [31:0] w, input [1:0] b);
@@ -247,9 +286,14 @@ module cache #(
             inv_pend    <= 1'b0;
             inv_rd      <= 1'b0;
             poison      <= 1'b0;
+            wf_rp       <= 2'd0;
+            wf_wp       <= 2'd0;
+            wf_cnt      <= 3'd0;
         end else begin
             ack_r  <= 1'b0;
             tag_we <= 1'b0;
+            wf_push = 1'b0;
+            wf_pop  = 1'b0;
 
             // Retire whatever is in flight. A fill needs its data first, so it
             // clears m_busy from S_FILL instead.
@@ -274,6 +318,7 @@ module cache #(
                     word_r  <= a_word;
                     byte_r  <= a_byte;
                     we_r    <= we;
+                    if_r    <= ifetch;
                     wdata_r <= wdata;
                     state   <= S_CHECK;
                     poison  <= 1'b0;           // a new access starts clean
@@ -300,29 +345,25 @@ module cache #(
                             word_r == hold_word && tag_r == hold_tag)
                             hold_valid <= 1'b0;
                     end
-                    if (!m_busy) begin
-                        m_addr  <= {tag_r, idx_r, word_r};
-                        m_wdata <= {4{wdata_r}};
-                        m_wmask <= (4'b0001 << byte_r);
-                        m_we    <= 1'b1;
-                        m_req   <= 1'b1;
-                        m_busy  <= 1'b1;
-                        ack_r   <= 1'b1;          // posted: CPU carries on
-                        state   <= S_GAP;
+                    if (!wf_full) begin
+                        wf_store;
+                        state <= S_IDLE;          // posted: acked now (chk_ok)
                     end else begin
-                        state <= S_WAIT;          // port busy; retry when free
+                        state <= S_WAIT;          // buffer full; retry
                     end
                 end else if (hit) begin
-                    // Served from the array: needs no SDRAM port, so this is
-                    // unaffected by any write still in flight.
-                    rdata_r <= pick(data_q, byte_r);
-                    ack_r   <= 1'b1;
-                    state   <= S_GAP;
-                    hold_data  <= data_q;      // keep the other three bytes
-                    hold_tag   <= tag_r;
-                    hold_idx   <= idx_r;
-                    hold_word  <= word_r;
-                    hold_valid <= 1'b1;
+                    // Served from the array, acked now (chk_ok): needs no
+                    // SDRAM port, so this is unaffected by any write still
+                    // in flight. An instruction fill leaves the held word to
+                    // the data accesses.
+                    state   <= S_IDLE;
+                    if (!if_r) begin
+                        hold_data  <= data_q;  // keep the other three bytes
+                        hold_tag   <= tag_r;
+                        hold_idx   <= idx_r;
+                        hold_word  <= word_r;
+                        hold_valid <= 1'b1;
+                    end
                 end else begin
                     state <= S_WAIT;
                 end
@@ -331,17 +372,14 @@ module cache #(
             //--------------------------------------------------------
             // Wait for the port, then do whatever S_CHECK could not.
             S_WAIT: begin
-                if (!m_busy) begin
-                    if (we_r) begin
-                        m_addr  <= {tag_r, idx_r, word_r};
-                        m_wdata <= {4{wdata_r}};
-                        m_wmask <= (4'b0001 << byte_r);
-                        m_we    <= 1'b1;
-                        m_req   <= 1'b1;
-                        m_busy  <= 1'b1;
-                        ack_r   <= 1'b1;
-                        state   <= S_GAP;
-                    end else begin
+                if (we_r) begin
+                    if (!wf_full || wf_merge) begin
+                        wf_store;
+                        ack_r <= 1'b1;
+                        state <= S_GAP;
+                    end
+                end else if (!m_busy && wf_cnt == 3'd0) begin
+                    begin
                         m_addr    <= {tag_r, idx_r, 2'b00};
                         m_we      <= 1'b0;
                         m_req     <= 1'b1;
@@ -384,11 +422,13 @@ module cache #(
                 rdata_r <= pick(data_q, byte_r);
                 ack_r   <= 1'b1;
                 state   <= S_GAP;
-                hold_data  <= data_q;
-                hold_tag   <= tag_r;
-                hold_idx   <= idx_r;
-                hold_word  <= word_r;
-                hold_valid <= 1'b1;
+                if (!if_r) begin
+                    hold_data  <= data_q;
+                    hold_tag   <= tag_r;
+                    hold_idx   <= idx_r;
+                    hold_word  <= word_r;
+                    hold_valid <= 1'b1;
+                end
             end
 
             // One cycle for the requester to see ack and move on, so we do not
@@ -397,6 +437,21 @@ module cache #(
 
             default: state <= S_IDLE;
             endcase
+
+            // Drain the write buffer: its oldest store goes to SDRAM whenever
+            // the port is free. (A fill starts only with the buffer empty, so
+            // the two never claim the port in the same cycle.)
+            if (wf_drain) begin
+                m_addr  <= wf_a[wf_rp];
+                m_wdata <= wf_d[wf_rp];
+                m_wmask <= wf_m[wf_rp];
+                m_we    <= 1'b1;
+                m_req   <= 1'b1;
+                m_busy  <= 1'b1;
+                wf_rp   <= wf_rp + 2'd1;
+                wf_pop = 1'b1;
+            end
+            wf_cnt <= wf_cnt + {2'd0, wf_push} - {2'd0, wf_pop};
 
             //--------------------------------------------------------
             // Invalidation. This comes after the case statement so that its

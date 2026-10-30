@@ -205,6 +205,9 @@ module soc #(
     end
 
     wire [7:0] sdram_q;
+    wire [31:0] sdram_q32;              // the cache's word, for the CPU's queue
+    reg  [31:0] rdata32;
+    reg         r32;
     wire [7:0] blt_q;
     wire [7:0] dma_q;
     // The DMA engine's cycles on the external bus (external_bus.v's DMA port)
@@ -224,6 +227,7 @@ module soc #(
     cpu_65c816 u_cpu (
         .clk(clk), .rst_n(cpu_rst_n),
         .addr(addr), .wdata(wdata), .rdata(rdata),
+        .rdata32(rdata32), .r32(r32),
         .we(we), .vld(vld), .rdy(rdy),
         .irq_n(irq_n), .nmi_n(1'b1), .abort_n(1'b1),
         .vpa(vpa), .vda(vda), .vpb_n(vpb_n), .mlb_n(mlb_n),
@@ -357,34 +361,35 @@ module soc #(
                                          : (rom_fast | (busy & ~sd_stall));
 
     //------------------------------------------------------------------
-    // Boot ROM, 16 bits wide.
+    // Boot ROM, 32 bits wide.
     //
-    // The width halves the number of block RAM accesses an instruction fetch
-    // needs. It was briefly
-    // paired with a held-word buffer that answered the second byte of a word in
-    // a single cycle, but that put a tag comparator in front of the CPU's ALU
-    // and became the critical path -- see the note below. Read data now comes
-    // straight off the block RAM output register.
+    // The CPU's instruction queue fills a word at a time, so a fetch from ROM
+    // brings four bytes for one two-cycle access. Read data comes straight
+    // off the block RAM output register.
     //
     // The image is a byte-wide memory file (`as -o rom.mem`): the bytes of
     // the ROM in order from its base, with no addresses in it, ROM_BYTES of
     // them (the Makefile pads a shorter image at the bottom). A word is read
-    // as its two bytes.
+    // as its four bytes.
     //------------------------------------------------------------------
     localparam integer ROM_BYTES = (1 << ROM_BITS);
 
     reg [7:0] rom [0:ROM_BYTES-1];
     initial $readmemh(ROM_HEX, rom);
 
-    wire [ROM_BITS-1:0] rom_even = {addr[ROM_BITS-1:1], 1'b0};
+    // 32 bits wide, for the CPU's instruction queue, which takes a word.
+    wire [ROM_BITS-1:0] rom_word = {addr[ROM_BITS-1:2], 2'b00};
 
-    reg [15:0] rom_q;
-    always @(posedge clk) rom_q <= {rom[rom_even | 1'b1], rom[rom_even]};
+    reg [31:0] rom_q;
+    always @(posedge clk)
+        rom_q <= {rom[rom_word | 2'd3], rom[rom_word | 2'd2],
+                  rom[rom_word | 2'd1], rom[rom_word]};
 
-    // Straight off the block RAM output register, then a 2:1 byte select --
-    // by the address bit as it was in the strobe cycle (see the read mux).
-    reg         rom_r, a0_r;
-    wire [7:0]  rom_byte = a0_r ? rom_q[15:8] : rom_q[7:0];
+    // Straight off the block RAM output register, then a 4:1 byte select --
+    // by the address bits as they were in the strobe cycle (see the read mux).
+    reg         rom_r;
+    reg  [1:0]  a10_r;
+    wire [7:0]  rom_byte = rom_q[{a10_r, 3'b000} +: 8];
 
     //------------------------------------------------------------------
     // R6501 serial port, for the Forth map only. In the default map the
@@ -432,7 +437,8 @@ module soc #(
 
         cache u_cache (
             .clk(clk), .rst_n(rst_n),
-            .addr(addr[22:0]), .wdata(wdata), .rdata(sdram_q), .rdata32(),
+            .addr(addr[22:0]), .wdata(wdata), .rdata(sdram_q), .rdata32(sdram_q32),
+            .ifetch(vpa & ~vda),          // the CPU's instruction-queue fills
             .req(vld & sel_sdram), .we(we), .ack(sdram_ack),
             .m_req(c_mreq), .m_we(c_mwe), .m_addr(c_maddr),
             .m_wdata(c_mwdata), .m_wmask(c_mwmask),
@@ -484,7 +490,9 @@ module soc #(
 
         mm_mux u_mm_mux (
             .clk(clk), .rst_n(rst_n),
-            .b_req(bl_req), .b_we(bl_we), .b_addr(bl_addr),
+            // The blitter, like the DMA engine, starts nothing while a CPU
+            // store is still queued in the cache: it reads what was written.
+            .b_req(bl_req), .b_hold(c_wr_busy), .b_we(bl_we), .b_addr(bl_addr),
             .b_wdata(bl_wdata), .b_wmask(bl_wmask),
             .b_done(bl_done), .b_rvalid(bl_rvalid),
             .d_req(dm_req), .d_we(dm_we), .d_addr(dm_addr),
@@ -545,6 +553,7 @@ module soc #(
         assign vid_red = 8'd0; assign vid_green = 8'd0; assign vid_blue = 8'd0;
         assign vid_hsync = 1'b1; assign vid_vsync = 1'b1; assign vid_de = 1'b0;
         assign sdram_q         = 8'hFF;
+        assign sdram_q32       = 32'hFFFF_FFFF;
         assign blt_q           = 8'hFF;
         assign dma_q           = 8'hFF;
         assign dma_irq         = 2'd0;
@@ -734,7 +743,7 @@ module soc #(
 
     always @(posedge clk) if (stb) begin
         rom_r  <= sel_rom;
-        a0_r   <= addr[0];
+        a10_r  <= addr[1:0];
         r_ser  <= sel_ser;
         r_adb  <= sel_adb;
         r_extc <= sel_extc;
@@ -778,6 +787,14 @@ module soc #(
         if (busy)         rdata = rom_r ? rom_byte : io_q;
         else if (ext_ack) rdata = ext_q;
         else              rdata = sdram_q;
+    end
+
+    // The whole word, for the CPU's instruction queue: ROM and SDRAM have
+    // one (r32); I/O and the external bus give their byte only.
+    always @* begin
+        if (busy)         begin rdata32 = rom_q;     r32 = rom_r; end
+        else if (ext_ack) begin rdata32 = 32'h0;     r32 = 1'b0;  end
+        else              begin rdata32 = sdram_q32; r32 = 1'b1;  end
     end
 
     //------------------------------------------------------------------

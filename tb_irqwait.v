@@ -45,6 +45,8 @@ module tb_irqwait;
     wire       rdy   = nowait ? 1'b1 : busy & (cnt == 2'd0);
     wire [23:0] ra   = nowait ? addr : la;
     wire [7:0] rdata = mem[ra[17:0]];
+    wire [17:0] wa = {ra[17:2], 2'b00};
+    wire [31:0] rdata32 = {mem[wa | 18'd3], mem[wa | 18'd2], mem[wa | 18'd1], mem[wa]};
 
     wire       done  = nowait ? (vld & rst_n) : (busy & (cnt == 2'd0));
     wire [23:0] da   = nowait ? addr : la;
@@ -110,7 +112,7 @@ module tb_irqwait;
 
     cpu_65c816 dut (
         .clk(clk), .rst_n(rst_n),
-        .addr(addr), .wdata(wdata), .rdata(rdata), .we(we), .vld(vld),
+        .addr(addr), .wdata(wdata), .rdata(rdata), .rdata32(rdata32), .r32(1'b1), .we(we), .vld(vld),
         .rdy(rdy), .irq_n(irq_line), .nmi_n(1'b1), .abort_n(1'b1),
         .vpa(), .vda(), .vpb_n(), .mlb_n(),
         .e_flag(), .m_flag(), .x_flag(), .stopped(stopped)

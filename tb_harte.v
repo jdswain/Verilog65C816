@@ -31,10 +31,12 @@ module tb_harte;
 
     reg [7:0] mem [0:16777215];        // full 16 MB
     wire [7:0] rdata = mem[addr];
+    wire [23:0] wa = {addr[23:2], 2'b00};
+    wire [31:0] rdata32 = {mem[wa | 24'd3], mem[wa | 24'd2], mem[wa | 24'd1], mem[wa]};
 
     cpu_65c816 dut (
         .clk(clk), .rst_n(rst_n),
-        .addr(addr), .wdata(wdata), .rdata(rdata),
+        .addr(addr), .wdata(wdata), .rdata(rdata), .rdata32(rdata32), .r32(1'b1),
         .we(we), .vld(vld), .rdy(1'b1),
         .irq_n(1'b1), .nmi_n(1'b1), .abort_n(1'b1),
         .vpa(), .vda(), .vpb_n(), .mlb_n(),
@@ -87,7 +89,7 @@ module tb_harte;
 
     reg [1023:0] fname;
     integer ntests, t, i, cyc, pass, fail, nprint, maxprint, dummy;
-    reg done, ok, ram_ok;
+    reg done, ok, ram_ok, started;
     reg [7:0] b;
 
     initial begin
@@ -149,15 +151,20 @@ module tb_harte;
             dut.irq1 = 1'b1; dut.irq2 = 1'b1;
             dut.nmi1 = 1'b1; dut.nmi2 = 1'b1;
             dut.xp = 1'b0; dut.lp = 1'b0; dut.snap_late = 1'b0;
+            dut.q = 64'h0; dut.qn = 4'd0; dut.fa = i_pc; dut.fbusy = 1'b0; dut.fdrop = 1'b0;
             wn = 0;
 
             // run one instruction
-            done = 0; cyc = 0;
+            // The instruction has begun once the state leaves S_FETCH or PC
+            // moves (an implied opcode stays in S_FETCH): the queue starts
+            // empty, so the first cycles only fill it.
+            done = 0; cyc = 0; started = 0;
             while (!done && cyc < 200) begin
                 @(posedge clk); #1;
                 cyc = cyc + 1;
-                if (dut.state == 5'd0 || dut.state == 5'd19
-                                      || dut.state == 5'd20)   // FETCH/WAI/STP
+                if (dut.state != 5'd0 || dut.PC !== i_pc) started = 1;
+                if (started && (dut.state == 5'd0 || dut.state == 5'd19
+                                || dut.state == 5'd20))        // FETCH/WAI/STP
                     done = 1;
             end
             // A read's or an implied opcode's execute is deferred to the

@@ -54,7 +54,7 @@ BIT      := impl/pnr/soc816.fs
 PROG     := $(GOWIN)/Programmer/bin/programmer_cli
 DEVICE   := GW2AR-18C
 
-.PHONY: all sim real send lint rom image show memtest exttest dmatest timertest romsize romswitch adbtest fbtest maptest imgload texttest blttest font forth forth-load forth-rom forth-bit mandel mandel-load bit prog boot talk flash scan clean
+.PHONY: all sim real send lint rom image show memtest exttest dmatest timertest bench romsize romswitch adbtest fbtest maptest imgload texttest blttest font forth forth-load forth-rom forth-bit mandel mandel-load bit prog boot talk flash scan clean
 
 all: sim
 
@@ -123,6 +123,11 @@ forth-bit: forth-rom
 # The SDRAM exerciser. Self-contained: its macro include lives in rom/.
 memtest:
 	cd rom && $(AS816) -o memtest.mem memtest.asm
+
+# The CPU benchmark (65Tools syntax): kernels run from SDRAM, timed in clocks.
+#   make bench && make sim ROM=rom/bench.mem   (several minutes of simulation)
+bench:
+	cd rom && ../../../65Tools/bin/as -o bench.mem bench.s > /dev/null
 
 # The ADB and framebuffer exercisers, and romsize (a 16 KB ROM at $C000).
 adbtest fbtest maptest imgload texttest blttest romsize:
