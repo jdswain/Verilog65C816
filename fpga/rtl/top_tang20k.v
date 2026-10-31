@@ -2,8 +2,8 @@
 // top_tang20k.v -- Tang Nano 20K (GW2AR-18) board wrapper
 //
 // The 27 MHz crystal feeds two PLLs: the system clock (sys_pll.v) for the CPU,
-// memory and peripherals, and the 25.2 MHz pixel clock (video_pll.v) for the
-// display. video.v's line buffer is the crossing between them.
+// memory and peripherals, and the pixel clock (video_pll.v) for the display,
+// 25.2 MHz for 640x480 or 64.8 MHz for 1024x768. video.v's line buffer is the crossing between them.
 //
 // The serial port goes to the onboard BL616, which presents it to the host as
 // a USB serial device -- no external adapter is needed. DIVISOR is the system
@@ -85,12 +85,20 @@ module top_tang20k #(
     localparam integer SYS_HZ    = 45_000_000;
     localparam integer DIVISOR   = (SYS_HZ + 57_600) / 115_200;
 
+    // The resolution, from `make bit RES=1024` (rom_path.vh): 1024x768 at a
+    // 64.8 MHz pixel clock, else 640x480 at 25.2 MHz.
+`ifdef VIDEO_RES
+    localparam XGA = (`VIDEO_RES == 1024);
+`else
+    localparam XGA = 0;
+`endif
+
     //------------------------------------------------------------------
     // Reset: hold for ~4 ms after configuration, and while S1 is pressed.
     // The button is synchronized before it is allowed to reset anything.
     //------------------------------------------------------------------
     wire clk_pix, clk_pix5, vpll_locked;
-    video_pll u_vpll (.clk27(clk), .rst_n(1'b1),
+    video_pll #(.XGA(XGA)) u_vpll (.clk27(clk), .rst_n(1'b1),
                       .clk_pix(clk_pix), .clk_pix5(clk_pix5),
                       .locked(vpll_locked));
 
@@ -153,6 +161,7 @@ module top_tang20k #(
         .FONT_HEX(FONT_HEX),
         .DIVISOR(DIVISOR),
         .SYS_HZ(SYS_HZ),
+        .XGA(XGA),
         .MAP(`ROM_MAP),
         .ROM_BITS(`ROM_BITS_DEF),
         .ROM_BASE(`ROM_BASE_DEF)

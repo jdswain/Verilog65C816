@@ -42,7 +42,12 @@ module tb_soc #(
     // Words of SDRAM modelled: all 8 MB, because the monitor's console writes
     // the text screen at $70_0000. Run with +screen to print that screen at
     // the timeout.
-    parameter integer MEM_WORDS = 2097152
+    parameter integer MEM_WORDS = 2097152,
+    // The display: 1024x768 with XGA=1. PIX_HALF is half the pixel clock's
+    // period; for the board's ratio to the system clock (45 MHz against 25.2
+    // or 64.8) with CLK_HALF=5, 8.93 or 3.47.
+    parameter         XGA       = 0,
+    parameter real    PIX_HALF  = 20.0
 ) ();
 
     reg clk = 1'b0;
@@ -54,9 +59,9 @@ module tb_soc #(
     reg  rxd = 1'b1;
     wire       led;
 
-    // 25.2 MHz pixel clock, near enough for simulation.
+    // The pixel clock: 25 MHz by default, near enough for simulation.
     reg clk_pix = 1'b0;
-    always #20 clk_pix = ~clk_pix;
+    always #(PIX_HALF) clk_pix = ~clk_pix;
 
     wire [10:0] sa; wire [1:0] sba; wire [3:0] sdqm; wire [31:0] sdq;
     wire scs_n, sras_n, scas_n, swe_n, scke, sclk;
@@ -74,7 +79,7 @@ module tb_soc #(
     wire sd_clk, sd_mosi, sd_cs_n, sd_card_miso, sd_card_oe;
     wire sd_miso = sd_card_oe ? sd_card_miso : 1'b1;
 
-    soc #(.ROM_HEX(ROM_HEX), .DIVISOR(DIVISOR), .SYS_HZ(SYS_HZ),
+    soc #(.ROM_HEX(ROM_HEX), .DIVISOR(DIVISOR), .SYS_HZ(SYS_HZ), .XGA(XGA),
           .MAP(MAP), .ROM_BITS(ROM_BITS), .ROM_BASE(ROM_BASE)) dut (
         .clk(clk), .rst_n(rst_n), .rxd(rxd), .txd(txd), .led(led),
         .dbg_addr(), .dbg_vld(), .dbg_we(), .dbg_stopped(),

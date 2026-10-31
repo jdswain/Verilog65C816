@@ -2,7 +2,7 @@
 
 The CPU core running the MiniMon monitor from a block-RAM boot ROM, with 8 MB
 of cached SDRAM, 640x480 video on the HDMI port (16-colour graphics or 80x30
-text), an Apple
+text; 1024x768 and 128x48 as a build option), an Apple
 Desktop Bus host for the keyboard, an external peripheral bus, and a console on
 both the display and the board's onboard USB serial bridge.
 
@@ -30,6 +30,7 @@ the 5V peripherals on a carrier (SCC, SCSI, floppy, DMA), is specified in
 ```
    27 MHz crystal --> rPLL x5/3 = 45 MHz (system clock: CPU, memory, peripherals)
                   \-> rPLL x14/3 = 126 MHz --> /5 = 25.2 MHz (pixel clock)
+                       (1024x768: x12 = 324 MHz --> /5 = 64.8 MHz)
 
      +------------------+        rdy
      |   cpu_65c816     |<---------------------+
@@ -208,10 +209,12 @@ matters.
 
 | Bit | Meaning |
 |---|---|
-| 0 | `0` = 640x480 16-colour graphics (reset default), `1` = 80x30 text |
-| 7-1 | unused, read as 0 |
+| 0 | `0` = 16-colour graphics (reset default), `1` = text, 80x30 (128x48 at 1024x768) |
+| 6-1 | unused, read as 0 |
+| 7 | read only: the build's resolution, `0` = 640x480, `1` = 1024x768 |
 
-Readable and writable. Both modes display the same memory at `$70_0000`; the
+Readable and writable (bit 7 ignores writes). Software that supports both
+resolutions reads bit 7 for the screen's size. Both modes display the same memory at `$70_0000`; the
 bit only changes how it is interpreted, so switching does not clear anything --
 text bytes show as coloured dots in graphics mode and vice versa. A change takes
 effect at the top of the next frame, never part-way down the screen.
@@ -219,7 +222,8 @@ effect at the top of the next frame, never part-way down the screen.
 ### Text buffer
 
 In text mode the screen is 80 columns by 30 rows of 8x16-pixel cells, in the
-Atari ST system font.
+Atari ST system font. A 1024x768 build has 128 x 48 cells, a row stride of 256
+bytes and 12288 bytes (`$3000`) in all; the table is the 640x480 build's.
 
 | | |
 |---|---|
@@ -282,8 +286,13 @@ flip. For flicker-free animation, either draw during vblank or implement page
 flipping in software by moving `FB_WORD_BASE` (currently a build-time parameter,
 not a register).
 
-Scanout costs 9.2 MB/s of read bandwidth, about a fifth of what the burst
-controller sustains; the rest is left for the CPU.
+A 1024x768 build has a line stride of 512 bytes and a 384 KB frame (`$70_0000`
+to `$75_FFFF`): the byte holding pixel (*x*, *y*) is `$700000 + y * 512 +
+(x >> 1)`, and the blitter's pixel address is `$E00000 + y * 1024 + x`.
+
+Scanout costs 9.2 MB/s of read bandwidth, about a tenth of what the burst
+controller sustains at 45 MHz, and 23.6 MB/s at 1024x768; the rest is left for
+the CPU. See [Video](#video) for what that costs it.
 
 ### Blitter -- `$03C0`
 
@@ -941,7 +950,8 @@ uninitialized ROM gets optimized away entirely.
 ## Video
 
 640x480 at 60 Hz over HDMI, scanned out of SDRAM through port 0 of the burst
-controller, as either 4bpp graphics or 80x30 text.
+controller, as either 4bpp graphics or 80x30 text; or 1024x768 and 128x48 in a
+build made with `make bit RES=1024` (see [1024x768](#1024x768) below).
 
 This section is about the hardware; the software-facing layout is under
 [Video control](#video-control----0380), [Text buffer](#text-buffer),
@@ -952,12 +962,54 @@ This section is about the hardware; the software-facing layout is under
 | Framebuffer | `$70_0000`, 320 bytes/line, 150 KB |
 | Pixel format | 4bpp, two pixels per byte, **low nibble first** |
 | Palette | 16 entries x 24-bit RGB |
-| Bandwidth | 9.2 MB/s, about 19% of what the controller sustains |
+| Bandwidth | 9.2 MB/s, about a tenth of what the controller sustains at 45 MHz |
 
 Pixel clock is 25.2 MHz (27 x 14/15), 0.1% fast of the nominal 25.175 and well
 inside tolerance, from `rPLL` at 126 MHz divided by 5. `hdmi_out.v` runs three
 TMDS encoders into four `OSER10` serializers (three data channels plus a clock
 channel sending a fixed `0000011111`) and out through `ELVDS_OBUF`.
+
+### 1024x768
+
+`make bit RES=1024` builds for a 1024x768 display (`RES` reaches the RTL as
+`VIDEO_RES` in the generated `rtl/rom_path.vh`, and `build.tcl` constrains the
+faster pixel clock). The resolution is fixed in the bitstream: changing it at
+run time would mean reprogramming the PLL. Bit 7 of `$0380` says which it is.
+
+| | 640x480 | 1024x768 |
+|---|---|---|
+| Pixel clock | 25.2 MHz (27 x 14/15) | 64.8 MHz (27 x 12/5), 0.3% under VESA's 65, so 59.8 Hz |
+| Serializer clock | 126 MHz | 324 MHz |
+| Timing (h, v) | 640+16+96+48, 480+10+2+33 | 1024+24+136+160, 768+3+6+29 |
+| Line, frame | 320 bytes, 150 KB | 512 bytes, 384 KB |
+| Text | 80 x 30, 4800 bytes | 128 x 48, 12288 bytes |
+| Scanout | 9.2 MB/s | 23.6 MB/s |
+
+The line buffer already had room for a 1024-pixel line (128 words a half), so
+only the sizes and the timing change. The pixel side meets 64.8 MHz, but only
+just (64.88 MHz); a pipeline stage in the palette or font path would give it
+room if a later change tips it over.
+
+**Video yields to the CPU between bursts.** Video outranks the CPU at the
+controller, and the fetch used to ask for its next burst the moment one
+finished, so a line's bursts (20 at 640x480, 32 at 1024x768) ran back to back
+and the CPU waited out the whole line fetch. It now drops its request for a
+cycle after each burst, and an access the CPU has waiting goes in between. A
+line has its whole line time to arrive and needs about a third of it. With
+`rom/bench.s` at 45 MHz (timer counts, graphics mode on, the board's clock
+ratios):
+
+| Display | Back to back | Yielding |
+|---|---|---|
+| 640x480 | 104,400 | 100,019 (-4%) |
+| 1024x768 | 122,867 (+18% on 640x480) | 102,106 (+2%) |
+
+Under the benchmark and under `blttest` (the blitter outranks the CPU) every
+line arrived in time once the SDRAM had initialised.
+
+Software written for 640x480 does not adapt by itself: MiniMon's console and
+OS16 assume 80x30 and 640x480, and draw at the wrong stride on a 1024x768
+build.
 
 ### Text mode
 
@@ -988,13 +1040,11 @@ that fails to load is caught by the same check in `make bit`.
 
 ### Things that are easy to get wrong here
 
-* **Two clock domains, currently the same clock.** `video.v` was written with
-  pixels leaving at 25.2 MHz and SDRAM and the CPU at 27 MHz. The whole SoC has
-  since moved onto the 25.2 MHz pixel clock, so the crossing no longer crosses
-  anything, but it is kept: the line buffer is written as words on the memory
-  clock and read as pixels on the pixel clock, which is what a dual-port block
-  RAM does natively, and the line/frame pulse goes through a toggle and two
-  flops rather than being used raw. A faster memory clock would need it again.
+* **Two clock domains.** Pixels leave at 25.2 MHz (64.8 at 1024x768) and
+  SDRAM and the CPU run at 45 MHz. The line buffer is written as words on the
+  memory clock and read as pixels on the pixel clock, which is what a dual-port
+  block RAM does natively, and the line/frame pulse goes through a toggle and
+  two flops rather than being used raw.
 * **The line buffer stride must be a power of two.** The half is selected by
   concatenation, which strides by 128, not by the 80 words a line uses. Sized at
   2x80 the upper half runs off the end after 32 words and every odd line loses
@@ -1019,11 +1069,14 @@ output together.
 `sim/tb_tmds.v` round-trips every byte through the encoder and decodes it back
 (1024 encodings), and checks the running disparity stays bounded on constant
 `00`/`FF` streams -- the solid-colour worst case. `sim/tb_video.v` preloads the
-SDRAM model with a known framebuffer and checks all 640 pixels of a line.
+SDRAM model with a known framebuffer, a different pattern on each line, and
+checks every pixel of the first four lines.
 
 `sim/tb_video_text.v` does the same for text mode, but checks a whole frame --
 all 307,200 pixels -- against the font image, since the likely faults there are
-per-row. `rom/texttest.asm` draws the full character set and all 16 colours
+per-row. Both take `-Ptb_video.XGA=1` (or `tb_video_text.XGA`) for 1024x768,
+with the board's 45 and 64.8 MHz clocks; `tb_soc` takes `XGA` and `PIX_HALF`
+likewise. `rom/texttest.asm` draws the full character set and all 16 colours
 from the CPU (`make texttest && make bit ROM=rom/texttest.mem && make prog`).
 
 `test/hdmitest.v` is the bring-up ladder rung for video: colour bars straight

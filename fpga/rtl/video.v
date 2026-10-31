@@ -1,14 +1,20 @@
 //============================================================================
-// video.v -- 640x480 display scanned out of SDRAM: 4bpp graphics or 80x30 text
+// video.v -- 640x480 or 1024x768 display scanned out of SDRAM: 4bpp graphics
+// or text
+//
+// The resolution is chosen when building (XGA, from `make bit RES=1024`): the
+// pixel clock differs, 25.2 or 64.8 MHz (video_pll.v), and nothing else does
+// but the sizes.
 //
 // GRAPHICS: 4 bits per pixel through a 16-entry palette: 320 bytes per line,
-// 150 KB for the frame, and 9.2 MB/s of read bandwidth -- about a fifth of what
-// the burst controller sustains, leaving the rest for the CPU.
+// 150 KB for the frame, and 9.2 MB/s of read bandwidth -- about a tenth of what
+// the burst controller sustains at 45 MHz, leaving the rest for the CPU. At
+// 1024x768 a line is 512 bytes, the frame 384 KB, and the bandwidth 23.6 MB/s.
 //
-// TEXT: 80 x 30 cells of 8x16 pixels. A cell is two bytes, the character code
+// TEXT: 80 x 30 cells of 8x16 pixels (128 x 48 at 1024x768). A cell is two bytes, the character code
 // then an attribute {background[3:0], foreground[3:0]}, both colours going
 // through the same palette. A row is 160 bytes and the screen 4800, at the same
-// base address as the graphics frame. The glyphs come from a 4 KB font ROM
+// base address as the graphics frame (256 and 12288 at 1024x768). The glyphs come from a 4 KB font ROM
 // addressed by {character, row within the cell}.
 //
 // Text reuses the graphics fetch unchanged apart from its length: each scanline
@@ -31,6 +37,7 @@
 `default_nettype none
 
 module video #(
+    parameter XGA = 0,                  // 1 = 1024x768, else 640x480
     // Framebuffer base as an SDRAM *word* address. Default $700000 bytes
     // (bank $70), well clear of where the CPU runs.
     parameter [20:0] FB_WORD_BASE = 21'h1C0000,
@@ -72,9 +79,9 @@ module video #(
     // of a frame, so a change never lands part-way down the screen.
     input  wire        text_mode
 );
-    localparam integer WORDS_PER_LINE = 80;     // 640 px * 4 bits / 32
-    localparam integer WORDS_PER_ROW  = 40;     // 80 cells * 16 bits / 32
-    localparam integer LINES          = 480;
+    localparam integer WORDS_PER_LINE = XGA ? 128 : 80;   // px * 4 bits / 32
+    localparam integer WORDS_PER_ROW  = XGA ?  64 : 40;   // cells * 16 bits / 32
+    localparam integer LINES          = XGA ? 768 : 480;
 
     assign m_we    = 1'b0;                      // video only ever reads
     assign m_wdata = 32'd0;
@@ -83,10 +90,11 @@ module video #(
     //------------------------------------------------------------------
     // Pixel-side timing
     //------------------------------------------------------------------
-    wire [9:0] x, y;
+    wire [10:0] x;
+    wire [9:0]  y;
     wire       t_hsync, t_vsync, t_de, t_line_start, t_frame_start;
 
-    video_timing u_tim (
+    video_timing #(.XGA(XGA)) u_tim (
         .clk(clk_pix), .rst_n(pix_rst_n),
         .x(x), .y(y), .active_x(), .active_y(),
         .hsync(t_hsync), .vsync(t_vsync), .de(t_de),
@@ -125,10 +133,11 @@ module video #(
     // Line buffer: two halves, written on clk, read on clk_pix.
     //
     // The half is selected by concatenation, which strides by 128 rather than
-    // by the 80 words a line actually uses -- so the array must be 2*128, not
-    // 2*80. Sized at 2*80 the upper half runs off the end after 32 words, and
-    // every odd line loses everything past pixel 256. The slack costs nothing:
-    // 256 x 32 bits still fits in a single block RAM.
+    // by the 80 words a 640-pixel line actually uses -- so the array must be
+    // 2*128, not 2*80. Sized at 2*80 the upper half runs off the end after 32
+    // words, and every odd line loses everything past pixel 256. The slack
+    // costs nothing: 256 x 32 bits still fits in a single block RAM, and a
+    // 1024-pixel line uses all 128.
     //------------------------------------------------------------------
     localparam integer BUF_STRIDE = 128;
     reg [31:0] lbuf [0:2*BUF_STRIDE-1];
@@ -138,8 +147,9 @@ module video #(
     // Fetch engine (memory domain)
     //------------------------------------------------------------------
     reg [9:0]  fetch_line;
-    reg [6:0]  wcount;                // 0..79 within the line
+    reg [7:0]  wcount;                // 0..WORDS_PER_LINE within the line
     reg        fetching;
+    reg        resume;                // ask for the line's next burst now
     reg        fetch_text;            // mode for the frame being fetched
     reg [20:0] line_base;             // word address of the line being fetched
     wire       fetch_half = fetch_line[0];
@@ -150,23 +160,25 @@ module video #(
     wire [20:0] next_base  = FB_WORD_BASE +
                              (fetch_text ? next_line[9:4] * WORDS_PER_ROW
                                          : next_line * WORDS_PER_LINE);
-    wire [6:0]  line_words = fetch_text ? WORDS_PER_ROW : WORDS_PER_LINE;
+    wire [7:0]  line_words = fetch_text ? WORDS_PER_ROW : WORDS_PER_LINE;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             m_req      <= 1'b0;
             m_addr     <= 21'd0;
             fetch_line <= 10'd0;
-            wcount     <= 7'd0;
+            wcount     <= 8'd0;
             fetching   <= 1'b0;
+            resume     <= 1'b0;
             fetch_text <= 1'b0;
             line_base  <= 21'd0;
         end else begin
+            resume <= 1'b0;
             if (frame_pulse) begin
                 // About to display line 0: fetch it into half 0.
                 // Line 0 starts at the base in either mode.
                 fetch_line <= 10'd0;
-                wcount     <= 7'd0;
+                wcount     <= 8'd0;
                 fetching   <= 1'b1;
                 fetch_text <= text_mode;
                 line_base  <= FB_WORD_BASE;
@@ -175,7 +187,7 @@ module video #(
             end else if (line_pulse) begin
                 if (fetch_line < LINES - 1) begin
                     fetch_line <= next_line;
-                    wcount     <= 7'd0;
+                    wcount     <= 8'd0;
                     fetching   <= 1'b1;
                     line_base  <= next_base;
                     m_addr     <= next_base;
@@ -186,19 +198,26 @@ module video #(
                 end
             end else if (fetching) begin
                 if (m_rvalid) begin
-                    lbuf[{fetch_half, wcount}] <= m_rdata;
+                    lbuf[{fetch_half, wcount[6:0]}] <= m_rdata;
                     wcount <= wcount + 1'b1;
                 end
                 if (m_done) begin
+                    // The next burst of four words in this line, a cycle
+                    // later: video outranks the CPU at the controller, and
+                    // asking again at once would lock it out for the whole
+                    // line (32 bursts at 1024x768). With the request down
+                    // for a cycle the CPU's waiting access goes in between.
+                    // A line has its whole line time to be fetched, and
+                    // needs about a third of it even so.
+                    m_req <= 1'b0;
                     if (wcount >= line_words) begin
                         fetching <= 1'b0;
-                        m_req    <= 1'b0;
                     end else begin
-                        // next burst of four words in this line
                         m_addr <= line_base + wcount;
-                        m_req  <= 1'b1;
+                        resume <= 1'b1;
                     end
-                end
+                end else if (resume)
+                    m_req <= 1'b1;
             end else begin
                 m_req <= 1'b0;
             end
@@ -252,6 +271,7 @@ module video #(
     end
 
     // Graphics: 8 pixels per word. Text: 2 cells, i.e. 16 pixels, per word.
+    // (x is below 1024 while displaying, so x[9:3] covers either width.)
     wire        disp_half = y[0];
     wire [6:0]  word_idx  = pix_text ? {1'b0, x[9:4]} : x[9:3];
 

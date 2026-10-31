@@ -87,6 +87,7 @@ module soc #(
     // the disk registers simply read back ROM filler.
     parameter integer MAP       = 0,
     parameter         USE_VIDEO = 1,
+    parameter         XGA       = 0,        // video 1024x768, else 640x480
     parameter integer SYS_HZ    = 25_200_000,   // the clock: timings derive from it
     parameter integer ROM_BITS  = 13,       // 8 KB
     parameter [15:0]  ROM_BASE  = 16'hE000
@@ -337,8 +338,9 @@ module soc #(
     //------------------------------------------------------------------
     // Video control, $0380
     //
-    //   bit 0   0 = 640x480 16-colour graphics (reset default)
-    //           1 = 80x30 text
+    //   bit 0   0 = 16-colour graphics (reset default)
+    //           1 = text, 80x30 (128x48 at 1024x768)
+    //   bit 7   read only: 0 = 640x480, 1 = 1024x768 (the build's, XGA)
     //
     // Both modes read the same memory at $70_0000; the bit only changes how
     // video.v interprets it, and takes effect at the top of the next frame.
@@ -349,7 +351,7 @@ module soc #(
         else if (stb & sel_vid & we)   vid_text <= wdata[0];
     end
 
-    wire [7:0] vid_q = {7'd0, vid_text};
+    wire [7:0] vid_q = {XGA != 0, 6'd0, vid_text};
 
 
     // A ROM word already in the buffer answers in the same cycle.
@@ -510,7 +512,7 @@ module soc #(
         wire [3:0]  v_wmask;
 
         if (USE_VIDEO != 0) begin : g_video
-            video #(.FONT_HEX(FONT_HEX)) u_video (
+            video #(.XGA(XGA), .FONT_HEX(FONT_HEX)) u_video (
                 .clk(clk), .rst_n(rst_n),
                 .m_req(v_req), .m_we(v_we), .m_addr(v_addr),
                 .m_wdata(v_wdata), .m_wmask(v_wmask),

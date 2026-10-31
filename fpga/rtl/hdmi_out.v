@@ -15,8 +15,8 @@
 `default_nettype none
 
 module hdmi_out (
-    input  wire       clk_pix,      // pixel clock (25.2 MHz)
-    input  wire       clk_pix5,     // 5x pixel clock (126 MHz)
+    input  wire       clk_pix,      // pixel clock (25.2 or 64.8 MHz)
+    input  wire       clk_pix5,     // 5x pixel clock (126 or 324 MHz)
     input  wire       rst_n,
 
     input  wire [7:0] red,

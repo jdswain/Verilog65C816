@@ -1,18 +1,24 @@
 //============================================================================
 // tb_video_text.v -- text mode: scan a known screen and check every pixel.
 //
-// Preloads the SDRAM model with 80x30 cells whose character and attribute are
-// a known function of position, then checks one whole frame -- all 307200
-// pixels -- against the font image. A whole frame rather than one line because
+// Preloads the SDRAM model with 80x30 cells (128x48 with -Ptb_video_text.XGA=1)
+// whose character and attribute are a known function of position, then checks
+// one whole frame -- all 307200 pixels, or 786432 -- against the font image. A whole frame rather than one line because
 // the things most likely to be wrong are per-row: the row address, the
 // scanline within the cell, and the line buffer's two halves.
 //============================================================================
 `timescale 1ns/1ps
 `default_nettype none
 
-module tb_video_text;
-    reg clk = 0;     always #18.5 clk = ~clk;        // 27 MHz
-    reg clk_pix = 0; always #19.8 clk_pix = ~clk_pix; // ~25.2 MHz
+module tb_video_text #(
+    parameter XGA = 0                                 // -Ptb_video_text.XGA=1
+);
+    localparam integer W = XGA ? 1024 : 640, H = XGA ? 768 : 480;
+    localparam integer COLS = W / 8, ROWS = H / 16;   // 80x30 or 128x48
+    localparam real    T_MEM = XGA ? 11.111 : 18.5;   // 45 / 27 MHz
+    localparam real    T_PIX = XGA ? 7.716 : 19.8;    // 64.8 / ~25.2 MHz
+    reg clk = 0;     always #(T_MEM) clk = ~clk;
+    reg clk_pix = 0; always #(T_PIX) clk_pix = ~clk_pix;
     reg rst_n = 0;
 
     wire        m_req, m_we, m_done, m_rvalid;
@@ -22,7 +28,7 @@ module tb_video_text;
     wire [7:0]  red, green, blue;
     wire        hsync, vsync, de;
 
-    video #(.FB_WORD_BASE(21'd0)) dut (
+    video #(.XGA(XGA), .FB_WORD_BASE(21'd0)) dut (
         .clk(clk), .rst_n(rst_n),
         .m_req(m_req), .m_we(m_we), .m_addr(m_addr), .m_wdata(m_wdata),
         .m_wmask(m_wmask), .m_done(m_done), .m_rvalid(m_rvalid), .m_rdata(m_rdata),
@@ -89,19 +95,19 @@ module tb_video_text;
     initial begin
         // Rows above the screen are left as X, so a fetch from the wrong
         // address shows up rather than reading plausible data.
-        for (row = 0; row < 30; row = row + 1)
-            for (col = 0; col < 80; col = col + 2)
-                mem.mem[row*40 + col/2] = {cell_attr(col+1, row), cell_char(col+1, row),
+        for (row = 0; row < ROWS; row = row + 1)
+            for (col = 0; col < COLS; col = col + 2)
+                mem.mem[row*(COLS/2) + col/2] = {cell_attr(col+1, row), cell_char(col+1, row),
                                            cell_attr(col,   row), cell_char(col,   row)};
 
         repeat (5) @(posedge clk); rst_n = 1;
         wait (idone);
 
         @(posedge vsync);            // end of a vertical sync: next de is (0,0)
-        for (py = 0; py < 480; py = py + 1) begin
+        for (py = 0; py < H; py = py + 1) begin
             @(negedge clk_pix);
             while (!de) @(negedge clk_pix);
-            for (px = 0; px < 640; px = px + 1) begin
+            for (px = 0; px < W; px = px + 1) begin
                 ch   = cell_char(px >> 3, py >> 4);
                 at   = cell_attr(px >> 3, py >> 4);
                 bits = font[{ch, py[3:0]}];
@@ -116,11 +122,11 @@ module tb_video_text;
                 @(negedge clk_pix);
             end
             if (de) begin
-                if (errors < 8) $display("FAIL line %0d: de still high after 640", py);
+                if (errors < 8) $display("FAIL line %0d: de still high after %0d", py, W);
                 errors = errors + 1;
             end
         end
-        $display("checked %0d pixels, %0d error(s)", npix, errors);
+        $display("%0dx%0d text: checked %0d pixels, %0d error(s)", W, H, npix, errors);
         if (errors == 0) $display("PASS"); else $display("FAIL (%0d)", errors);
         $finish;
     end
