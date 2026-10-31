@@ -16,8 +16,10 @@
 // Instruction bytes come from an 8-byte queue, never straight off the bus.
 // The queue fills a 32-bit word at a time (rdata32) in cycles the core does
 // not use the bus. An instruction takes two cycles from its head, the opcode
-// and then all its operand bytes at once (S_OPS); a jump empties it. Self-modifying code is not supported:
-// a store to bytes already queued does not change them.
+// and then all its operand bytes at once (S_OPS); a jump empties it. A store
+// to bytes already queued (at most the 8 after the current instruction) does
+// not change them: code written by stores needs a taken jump before it runs,
+// or must lie 8 bytes or more past the store.
 //
 // Bus protocol (simple synchronous SRAM-style):
 //   - When `vld` is high a bus cycle is in progress at `addr`.
@@ -181,8 +183,8 @@ module cpu_65c816 (
     // from the bus: a fetcher fills it a word at a time in the cycles the
     // core does not use the bus, and the core takes bytes from its head.
     // q[7:0] is the byte at PC; fa = PC + qn is the next byte to fetch.
-    // A jump empties it (and drops a fetch in flight). Self-modifying code
-    // is not supported: bytes already queued are not refetched.
+    // A jump empties it (and drops a fetch in flight). Bytes already queued
+    // are not refetched when a store changes them.
     reg [63:0] q;
     reg [3:0]  qn;            // bytes queued, 0-8
     reg [15:0] fa;            // offset in PBR of the next byte to fetch

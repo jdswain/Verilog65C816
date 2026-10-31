@@ -89,8 +89,12 @@ and an instruction takes two cycles from it: the opcode, then all of its
 operand bytes at once. A fill holds
 the bus until `rdy` like any access; a state that does not use the bus keeps
 running meanwhile. A jump empties the queue. Queue fills are the cycles with
-`vpa` high and `vda` low. Self-modifying code is not supported: a store to
-bytes already in the queue does not change them.
+`vpa` high and `vda` low. A store to bytes already in the queue does not
+change them; the queue holds at most the 8 bytes after the instruction being
+executed. Code written by stores therefore runs correctly if a taken branch,
+jump, call, return or interrupt comes between the store and the changed bytes
+(it empties the queue), or if every changed byte is at least 8 bytes past the
+end of the storing instruction. The SoC's cache is coherent with CPU stores.
 
 ## Cycle counts (rdy held high)
 

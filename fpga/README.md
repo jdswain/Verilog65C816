@@ -1847,9 +1847,13 @@ iverilog -g2005 -o /tmp/sdsim rtl/sdram_ctrl.v sim/sdram_model.v sim/tb_sdram.v 
   formed before the previous instruction's deferred execute (an `INX` before
   an `abs,X`), and the timing margin at 45 MHz is under 2%.
 * **Split I/D caches.** The architecture notes argued against them because of
-  self-modifying code; that constraint has since been dropped, which removes the
-  objection. Instruction fetch is 84% of traffic and purely sequential, so an
-  I-cache with a wide line suits it while data keeps the write-through path.
+  self-modifying code; that constraint has since been relaxed. Instruction
+  fetch is 84% of traffic and purely sequential, so an I-cache with a wide line
+  suits it while data keeps the write-through path. But code written by stores
+  still has to run: OS16 loads modules with ordinary stores and patches the
+  banks of its MVN/MVP, relying on the queue rule to see them (see the core's
+  README). An I-cache would have to snoop CPU stores, or the rule change to an
+  explicit invalidate that OS16 then uses.
 * **Faster SDRAM clock.** Would not help the critical path -- the SDRAM
   controller is not on it -- but would cut miss cost (~18 cycles, mostly burst)
   and roughly quadruple video bandwidth headroom. Needs a clock-domain crossing.
