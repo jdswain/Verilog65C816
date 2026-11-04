@@ -10,6 +10,11 @@ add_file -type verilog ../cpu_65c816.v
 # Glob rather than listing files: adding a module and forgetting to list it
 # here fails late, as an "unknown module" black box during synthesis.
 foreach f [lsort [glob rtl/*.v]] { add_file -type verilog $f }
+# Gowin's DVI_TX IP (encrypted core) and its wrapper, used when top_tang20k.v
+# defines HDMI_USE_IP. They live outside rtl/ because the Makefile's wildcard
+# (lint, the simulations) has no DVI_TX_Top to resolve the wrapper against.
+add_file -type verilog ip/dvi_tx/dvi_tx.v
+add_file -type verilog ip/dvi_tx/hdmi_out_ip.v
 # The SIDs (reDIP SID, CERN-OHL-S v2) are SystemVerilog; the package first.
 add_file -type verilog rtl/sid/sid_pkg.sv
 foreach f [lsort [glob rtl/sid/*.sv]] {
@@ -21,8 +26,8 @@ add_file -type cst   tang_nano_20k.cst
 # that ratio is constrained instead.
 if {[info exists ::env(RES)] && $::env(RES) == 1024} {
     set fi [open tang_nano_20k.sdc r]; set sdc [read $fi]; close $fi
-    set n [regsub -- {-multiply_by 14 -divide_by 3 (\[get_pins \{u_vpll)} $sdc {-multiply_by 12 -divide_by 1 \1} sdc]
-    if {$n != 1} { error "build.tcl: the pixel clock's ratio not found in tang_nano_20k.sdc" }
+    set n [regsub -all -- {-multiply_by 14 -divide_by 3 (\[get_pins \{u_vpll)} $sdc {-multiply_by 12 -divide_by 1 \1} sdc]
+    if {$n != 2} { error "build.tcl: the pixel clock's ratio not found twice (CLKOUT, CLKOUTP) in tang_nano_20k.sdc" }
     file mkdir impl
     set fo [open impl/xga.sdc w]; puts -nonewline $fo $sdc; close $fo
     add_file -type sdc impl/xga.sdc
@@ -38,6 +43,14 @@ set_option -top_module top_tang20k
 set_option -verilog_std sysv2017
 # Pins 54-56 (I2S) double as SSPI configuration pins.
 set_option -use_sspi_as_gpio 1
+# Timing-driven placement and routing. The system clock at 40.5 MHz is
+# marginal (CPU paths of 14-17 logic levels): with the defaults, placement
+# decides pass or fail from one build to the next (36.6-43.9 MHz seen on the
+# same source in Nov 2026); with both options on, the one build so far made
+# 42.9 MHz. place_option 2 gave a byte-identical result to 1; 3 and 4 are
+# rejected by this version.
+set_option -place_option 1
+set_option -route_option 1
 set_option -output_base_name soc816
 
 run all

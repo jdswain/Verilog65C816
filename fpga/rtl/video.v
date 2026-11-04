@@ -44,7 +44,10 @@ module video #(
     // Font image: 4096 bytes, one per line, glyph after glyph (tools/mkfont.py).
     // Synthesis needs an absolute path here, for the same reason the boot ROM
     // does -- see rom_path.vh. The default suits a simulation run from fpga/.
-    parameter FONT_HEX = "rom/font_st8x16.hex"
+    parameter FONT_HEX = "rom/font_st8x16.hex",
+    // 1: drop the fetch request for a cycle after each burst, letting the
+    // CPU in (see the fetch engine). 0: ask again at once, as before 7725fee.
+    parameter YIELD = 1
 ) (
     // memory-side domain
     input  wire        clk,
@@ -77,7 +80,16 @@ module video #(
 
     // 0 = graphics, 1 = text. Memory domain; each side samples it at the top
     // of a frame, so a change never lands part-way down the screen.
-    input  wire        text_mode
+    input  wire        text_mode,
+
+    // The fetch engine's counts and state, read at $0390-$039F (soc.v), so
+    // software can watch it while the picture is wrong.
+    output wire [127:0] dbg,
+    // The number of non-black pixels in the last frame, and one pixel of it
+    // as it left the palette -- {colour index, red, green, blue}, the
+    // 400000th displayed -- for $03A0-$03AB (pixel domain, read unsynchronised).
+    output reg  [23:0]  lit_pixels,
+    output reg  [31:0]  pix_sample
 );
     localparam integer WORDS_PER_LINE = XGA ? 128 : 80;   // px * 4 bits / 32
     localparam integer WORDS_PER_ROW  = XGA ?  64 : 40;   // cells * 16 bits / 32
@@ -214,7 +226,8 @@ module video #(
                         fetching <= 1'b0;
                     end else begin
                         m_addr <= line_base + wcount;
-                        resume <= 1'b1;
+                        if (YIELD) resume <= 1'b1;
+                        else       m_req  <= 1'b1;
                     end
                 end else if (resume)
                     m_req <= 1'b1;
@@ -225,30 +238,68 @@ module video #(
     end
 
     //------------------------------------------------------------------
+    // Counts for dbg: frames and lines started, bursts finished, and the
+    // last word the controller gave the fetch.
+    //------------------------------------------------------------------
+    reg [15:0] n_frames, n_lines;
+    reg [31:0] n_bursts;
+    reg [15:0] last_word;
+    // Underruns: a line (or frame) starting while the previous line's fetch
+    // was still going -- the display then shows what that half held before.
+    reg [15:0] underruns;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            n_frames  <= 16'd0;
+            n_lines   <= 16'd0;
+            n_bursts  <= 32'd0;
+            last_word <= 16'd0;
+            underruns <= 16'd0;
+        end else begin
+            if (frame_pulse) n_frames <= n_frames + 1'b1;
+            if (line_pulse)  n_lines  <= n_lines + 1'b1;
+            if (fetching & m_done)   n_bursts  <= n_bursts + 1'b1;
+            if (fetching & m_rvalid) last_word <= m_rdata[15:0];
+            if ((line_pulse | frame_pulse) & fetching & ~&underruns)
+                underruns <= underruns + 1'b1;
+        end
+    end
+    assign dbg = {underruns, last_word, 6'd0, fetch_line, wcount,
+                  3'd0, text_mode, fetch_text, resume, m_req, fetching,
+                  n_bursts, n_lines, n_frames};
+
+    //------------------------------------------------------------------
     // Palette (written from the memory domain, read from the pixel domain --
     // software only changes it during blanking, so no crossing is needed).
     //------------------------------------------------------------------
-    reg [23:0] palette [0:15];
+    // One array per component, each written whole. As one 24-bit array written
+    // a byte lane at a time, the tools extract a RAM with partial-word writes,
+    // which block and distributed RAM do not have (see cache.v).
+    reg [7:0] pal_r [0:15];
+    reg [7:0] pal_g [0:15];
+    reg [7:0] pal_b [0:15];
     integer i;
+    reg [23:0] pal_init [0:15];
     initial begin
         // A default 16-colour set so something is visible before software
         // writes its own.
-        palette[0]  = 24'h000000; palette[1]  = 24'h0000AA;
-        palette[2]  = 24'h00AA00; palette[3]  = 24'h00AAAA;
-        palette[4]  = 24'hAA0000; palette[5]  = 24'hAA00AA;
-        palette[6]  = 24'hAA5500; palette[7]  = 24'hAAAAAA;
-        palette[8]  = 24'h555555; palette[9]  = 24'h5555FF;
-        palette[10] = 24'h55FF55; palette[11] = 24'h55FFFF;
-        palette[12] = 24'hFF5555; palette[13] = 24'hFF55FF;
-        palette[14] = 24'hFFFF55; palette[15] = 24'hFFFFFF;
+        pal_init[0]  = 24'h000000; pal_init[1]  = 24'h0000AA;
+        pal_init[2]  = 24'h00AA00; pal_init[3]  = 24'h00AAAA;
+        pal_init[4]  = 24'hAA0000; pal_init[5]  = 24'hAA00AA;
+        pal_init[6]  = 24'hAA5500; pal_init[7]  = 24'hAAAAAA;
+        pal_init[8]  = 24'h555555; pal_init[9]  = 24'h5555FF;
+        pal_init[10] = 24'h55FF55; pal_init[11] = 24'h55FFFF;
+        pal_init[12] = 24'hFF5555; pal_init[13] = 24'hFF55FF;
+        pal_init[14] = 24'hFFFF55; pal_init[15] = 24'hFFFFFF;
+        for (i = 0; i < 16; i = i + 1) begin
+            pal_r[i] = pal_init[i][23:16];
+            pal_g[i] = pal_init[i][15:8];
+            pal_b[i] = pal_init[i][7:0];
+        end
     end
-    always @(posedge clk) if (pal_we) begin
-        case (pal_sel)
-        2'd0: palette[pal_idx][23:16] <= pal_byte;   // red
-        2'd1: palette[pal_idx][15:8]  <= pal_byte;   // green
-        2'd2: palette[pal_idx][7:0]   <= pal_byte;   // blue
-        default: ;
-        endcase
+    always @(posedge clk) begin
+        if (pal_we && pal_sel == 2'd0) pal_r[pal_idx] <= pal_byte;
+        if (pal_we && pal_sel == 2'd1) pal_g[pal_idx] <= pal_byte;
+        if (pal_we && pal_sel == 2'd2) pal_b[pal_idx] <= pal_byte;
     end
 
     //------------------------------------------------------------------
@@ -329,11 +380,54 @@ module video #(
     wire [3:0] colour    = !pix_text ? nib_q :
                            glyph_bit ? attr_q[3:0] : attr_q[7:4];
 
+    reg [3:0] colour_r;               // the index behind red/green/blue
     always @(posedge clk_pix) begin
-        {red, green, blue} <= de_q ? palette[colour] : 24'h000000;
+        colour_r <= colour;
+        {red, green, blue} <= de_q ? {pal_r[colour], pal_g[colour], pal_b[colour]}
+                                   : 24'h000000;
         de    <= de_q;
         hsync <= hs_q;
         vsync <= vs_q;
+    end
+
+    // Pixels sent that are not black, frame by frame, for lit_pixels, and
+    // the sample for pix_sample.
+    // Also a check on the frame itself: clocks per frame and active pixels
+    // per frame must be exactly the mode's, every frame. A frame that was
+    // not sets a sticky flag, in pix_sample's top bits (bit 31 wrong length,
+    // bit 30 wrong active count), from the second frame after reset on.
+    localparam integer FRAME_CLKS = (XGA ? 1344 : 800) * (XGA ? 806 : 525);
+    localparam integer FRAME_PIX  = (XGA ? 1024 : 640) * (XGA ? 768 : 480);
+    reg [23:0] lit_count, de_count, clk_count;
+    reg        bad_len, bad_pix, frame_seen;
+    always @(posedge clk_pix or negedge pix_rst_n) begin
+        if (!pix_rst_n) begin
+            lit_count  <= 24'd0;
+            de_count   <= 24'd0;
+            clk_count  <= 24'd0;
+            bad_len    <= 1'b0;
+            bad_pix    <= 1'b0;
+            frame_seen <= 1'b0;
+            lit_pixels <= 24'd0;
+            pix_sample <= 32'd0;
+        end else if (t_frame_start) begin
+            lit_pixels <= lit_count;
+            lit_count  <= 24'd0;
+            de_count   <= 24'd0;
+            clk_count  <= 24'd0;
+            frame_seen <= 1'b1;
+            if (frame_seen && clk_count != FRAME_CLKS - 1) bad_len <= 1'b1;
+            if (frame_seen && de_count  != FRAME_PIX)      bad_pix <= 1'b1;
+            pix_sample[31:30] <= {bad_len, bad_pix};
+        end else begin
+            clk_count <= clk_count + 1'b1;
+            if (de) begin
+                de_count <= de_count + 1'b1;
+                if (|{red, green, blue}) lit_count <= lit_count + 1'b1;
+                if (de_count == 24'd400000)
+                    pix_sample[29:0] <= {2'd0, colour_r, red, green, blue};
+            end
+        end
     end
 endmodule
 

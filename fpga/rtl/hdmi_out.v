@@ -16,8 +16,9 @@
 
 module hdmi_out (
     input  wire       clk_pix,      // pixel clock (25.2 or 64.8 MHz)
-    input  wire       clk_pix5,     // 5x pixel clock (126 or 324 MHz)
-    input  wire       rst_n,
+    input  wire       clk_pix5,     // 5x pixel clock (126 or 324 MHz), the serializers' own PLL output
+    input  wire       rst_n,        // the encoders', synchronous to clk_pix
+    input  wire       ser_rst_n,    // the serializers' (top_tang20k.v)
 
     input  wire [7:0] red,
     input  wire [7:0] green,
@@ -41,7 +42,14 @@ module hdmi_out (
     tmds_encoder u_r (.clk(clk_pix), .rst_n(rst_n), .din(red),
                       .ctrl(2'b00), .de(de), .dout(tm_red));
 
-    wire reset = ~rst_n;
+    // The serializers' reset is released one 5x clock after the pixel clock
+    // divider's (top_tang20k.v), on their own 5x clock, clk_pix5 here, which
+    // is a PLL output separate from the divider's (video_pll.v): the
+    // arrangement that ended the 1024x768 sync loss. (Re-timing the words on
+    // the falling edge of the pixel clock before the D inputs was tried on
+    // 2026-11-03 for a hold-margin theory; it only moved which reset lags
+    // were catastrophic, and is gone.)
+    wire reset = ~ser_rst_n;
     wire [2:0] ser_d;
     wire       ser_clk;
 
@@ -69,6 +77,12 @@ module hdmi_out (
         .D5(1'b1), .D6(1'b1), .D7(1'b1), .D8(1'b1), .D9(1'b1),
         .PCLK(clk_pix), .FCLK(clk_pix5), .RESET(reset));
 
+    // Emulated LVDS: two 3.3 V CMOS drivers a pair (LVCMOS33D, DRIVE 8 in the
+    // .cst). True LVDS (TLVDS_OBUF, IO_TYPE LVDS25, DRIVE 3.5, which Sipeed's
+    // HDMI example for this board uses) was tried on 2026-11-03 and made even
+    // the static text screen lose sync: this board's HDMI path wants the big
+    // swing, so the series resistors on its TMDS lines are doing the TMDS
+    // current emulation.
     ELVDS_OBUF u_buf_c (.I(ser_clk),  .O(tmds_clk_p),  .OB(tmds_clk_n));
     ELVDS_OBUF u_buf_0 (.I(ser_d[0]), .O(tmds_d_p[0]), .OB(tmds_d_n[0]));
     ELVDS_OBUF u_buf_1 (.I(ser_d[1]), .O(tmds_d_p[1]), .OB(tmds_d_n[1]));

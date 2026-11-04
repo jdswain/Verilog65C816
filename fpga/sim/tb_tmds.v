@@ -36,6 +36,10 @@ module tb_tmds;
         end
     endfunction
 
+    // dout is two clocks behind din: the encoder's two steps are registered.
+    reg [7:0] din_d1 = 0, din_d2 = 0;
+    always @(posedge clk) begin din_d1 <= din; din_d2 <= din_d1; end
+
     reg [7:0] sent [0:3];
     integer si = 0;
 
@@ -63,12 +67,11 @@ module tb_tmds;
                 din = i[7:0];
                 @(posedge clk);
                 #1;
-                // dout corresponds to the din presented one clock earlier
-                // dout is registered, so after this edge it holds encode(din)
-                if (tmds_decode(dout) !== din) begin
+                // after this edge dout holds encode(din of the edge before)
+                if ((rep > 0 || i > 0) && tmds_decode(dout) !== din_d2) begin
                     if (errors < 5)
                         $display("FAIL round-trip: sent %02x, encoded %b, decoded %02x",
-                                 din, dout, tmds_decode(dout));
+                                 din_d2, dout, tmds_decode(dout));
                     errors = errors + 1;
                 end
                 if (dut.cnt > max_disp)  max_disp = dut.cnt;
@@ -89,7 +92,7 @@ module tb_tmds;
             max_disp = 0;
             for (i = 0; i < 300; i = i + 1) begin
                 @(posedge clk); #1;
-                if (tmds_decode(dout) !== din) begin
+                if (i > 0 && tmds_decode(dout) !== din_d2) begin
                     $display("FAIL constant %02x round-trip", din);
                     errors = errors + 1; i = 300;
                 end

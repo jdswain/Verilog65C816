@@ -15,11 +15,11 @@ module hdmitest (
     wire      rst_n = por[7];
     always @(posedge clk) if (!rst_n) por <= por + 1'b1;
 
-    wire clk_pix, clk_pix5, locked;
-    video_pll u_pll (.clk27(clk), .rst_n(rst_n),
-                     .clk_pix(clk_pix), .clk_pix5(clk_pix5), .locked(locked));
-
+    wire clk_pix, clk_pix5, clk_ser, locked;
     wire vrst_n = rst_n & locked;
+    video_pll u_pll (.clk27(clk), .rst_n(rst_n), .div_rst_n(vrst_n),
+                     .calib(1'b0), .clk_ser(clk_ser),
+                     .clk_pix(clk_pix), .clk_pix5(clk_pix5), .locked(locked));
 
     wire [9:0] x, y;
     wire hsync, vsync, de;
@@ -42,7 +42,7 @@ module hdmitest (
     end
 
     hdmi_out u_hdmi (
-        .clk_pix(clk_pix), .clk_pix5(clk_pix5), .rst_n(vrst_n),
+        .clk_pix(clk_pix), .clk_pix5(clk_ser), .rst_n(vrst_n), .ser_rst_n(vrst_n),
         .red(r), .green(g), .blue(b),
         .hsync(hsync), .vsync(vsync), .de(de),
         .tmds_clk_p(tmds_clk_p), .tmds_clk_n(tmds_clk_n),

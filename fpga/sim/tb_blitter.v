@@ -51,6 +51,7 @@ module tb_blitter;
     wire scs, sras, scas, swe, scke, idone;
 
     sdram_burst #(.FREQ(25_200_000)) u_sd (
+        .hold_bus(1'b1),
         .clk(clk), .rst_n(rst_n),
         .p0_req(1'b0), .p0_we(1'b0), .p0_addr(21'd0), .p0_wdata(32'd0),
         .p0_wmask(4'd0), .p0_done(), .p0_rvalid(),

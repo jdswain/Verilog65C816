@@ -43,6 +43,12 @@ module sdram_burst #(
 ) (
     input  wire        clk,
     input  wire        rst_n,
+    // 1: the data bus is never left floating -- after each operation the
+    // controller drives it at the level it already has (the last word read,
+    // or the word just written) until it issues the next READ. A write is
+    // then a change of a driven bus, not 32 drivers turning on into levels the
+    // SDRAM left, possibly all opposite: see the note at the top.
+    input  wire        hold_bus,
 
     // ---- master port 0 (higher priority: video) ----
     input  wire        p0_req,
@@ -185,7 +191,7 @@ module sdram_burst #(
             {sdram_ras_n, sdram_cas_n, sdram_we_n} <= CMD_NOP;
         end else begin
             {sdram_ras_n, sdram_cas_n, sdram_we_n} <= CMD_NOP;
-            dq_oe     <= 1'b0;
+            if (!hold_bus) dq_oe <= 1'b0;   // else dq_oe is set below
             p0_done   <= 1'b0;
             p1_done   <= 1'b0;
             p2_done   <= 1'b0;
@@ -276,6 +282,7 @@ module sdram_burst #(
                 // A10 low: keep the row open for the next access.
                 S_READ: begin
                     {sdram_ras_n, sdram_cas_n, sdram_we_n} <= CMD_READ;
+                    dq_oe     <= 1'b0;      // the SDRAM drives from CAS on
                     sdram_a   <= {3'b000, req_col};
                     sdram_ba  <= req_bank;
                     sdram_dqm <= 4'b0000;
@@ -313,7 +320,16 @@ module sdram_burst #(
 
                 // Masters hold req until they see done, so returning straight
                 // to S_IDLE would re-latch the finished request and run it again.
-                S_GAP: state <= S_IDLE;
+                S_GAP: begin
+                    // Two clocks after the last read word the SDRAM has let
+                    // go of the bus: take it over at the level it has. After
+                    // a write dq_out is already the bus's level.
+                    if (hold_bus) begin
+                        if (!dq_oe) dq_out <= rdata;
+                        dq_oe <= 1'b1;
+                    end
+                    state <= S_IDLE;
+                end
 
                 //--------------------------------------------------
                 S_REFRESH: begin

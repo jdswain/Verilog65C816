@@ -28,7 +28,7 @@ the 5V peripherals on a carrier (SCC, SCSI, floppy, DMA), is specified in
 [`docs/Hardware.md`](../docs/Hardware.md).
 
 ```
-   27 MHz crystal --> rPLL x5/3 = 45 MHz (system clock: CPU, memory, peripherals)
+   27 MHz crystal --> rPLL x3/2 = 40.5 MHz (system clock: CPU, memory, peripherals)
                   \-> rPLL x14/3 = 126 MHz --> /5 = 25.2 MHz (pixel clock)
                        (1024x768: x12 = 324 MHz --> /5 = 64.8 MHz)
 
@@ -111,7 +111,7 @@ rising one; MOSI idles high.
 | `$02C0` | DATA | write: send the byte (an exchange). Read: the byte last received |
 | `$02C1` | NEXT | read: the byte last received, and send `$FF` to receive the next. Writes are ignored |
 | `$02C2` | STATUS / CONTROL | read: bit 7 busy, bit 0 select. Write: bit 0 select, 1 drives chip select low |
-| `$02C3` | DIVIDER | SCLK = system clock / (2 * (DIVIDER + 1)); at reset the smallest value giving 400 kHz or less (56, 394.7 kHz, at 45 MHz), for the card's start-up; 0 is 22.5 MHz |
+| `$02C3` | DIVIDER | SCLK = system clock / (2 * (DIVIDER + 1)); at reset the smallest value giving 400 kHz or less (50, 397.1 kHz, at 40.5 MHz), for the card's start-up; 0 is 20.25 MHz |
 
 The registers repeat through the slot. An exchange takes 16 * (DIVIDER + 1)
 + 1 clocks.
@@ -1007,9 +1007,9 @@ ratios):
 Under the benchmark and under `blttest` (the blitter outranks the CPU) every
 line arrived in time once the SDRAM had initialised.
 
-Software written for 640x480 does not adapt by itself: MiniMon's console and
-OS16 assume 80x30 and 640x480, and draw at the wrong stride on a 1024x768
-build.
+MiniMon and OS16 (from OS16 e05cbc4) are fixed at 1024x768 and do not read
+bit 7 of `$0380`, so they need a `RES=1024` build; on a 640x480 build they draw
+at the wrong stride. Older ROMs are the reverse.
 
 ### Text mode
 
