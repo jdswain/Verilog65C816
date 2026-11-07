@@ -118,6 +118,16 @@ IO_PORT "uart_rx" IO_TYPE=LVCMOS33 PULL_MODE=UP;
 
 // HDMI. A differential pair takes both pin numbers on the _p port only;
 // the _n port is implied and must not appear here.
+//
+// The pins are emulated LVDS (LVCMOS33D, hdmi_out.v) driving the sink's
+// 50 ohm terminations to 3.3 V, so the drive strength sets the swing and
+// the edges. The drive is not the lever for the 1024x768 (648 Mbit/s a
+// lane) dropouts a Samsung monitor shows under video traffic where a Sony
+// TV holds (Nov 2026): 4 and 12 mA gave it no picture at all, 16 mA held
+// pattern blits but the graphical boot screen jittered vertically and then
+// blanked, 8 mA holds the text screen and loses the desktop. The text
+// screen is solid at every drive that shows anything, so what fails comes
+// with graphics-mode fetch and blitter traffic, not with the link alone.
 IO_LOC  "tmds_clk_p" 33,34;
 IO_PORT "tmds_clk_p" PULL_MODE=NONE DRIVE=8 BANK_VCCIO=3.3;
 IO_LOC  "tmds_d_p[0]" 35,36;

@@ -10,11 +10,6 @@ add_file -type verilog ../cpu_65c816.v
 # Glob rather than listing files: adding a module and forgetting to list it
 # here fails late, as an "unknown module" black box during synthesis.
 foreach f [lsort [glob rtl/*.v]] { add_file -type verilog $f }
-# Gowin's DVI_TX IP (encrypted core) and its wrapper, used when top_tang20k.v
-# defines HDMI_USE_IP. They live outside rtl/ because the Makefile's wildcard
-# (lint, the simulations) has no DVI_TX_Top to resolve the wrapper against.
-add_file -type verilog ip/dvi_tx/dvi_tx.v
-add_file -type verilog ip/dvi_tx/hdmi_out_ip.v
 # The SIDs (reDIP SID, CERN-OHL-S v2) are SystemVerilog; the package first.
 add_file -type verilog rtl/sid/sid_pkg.sv
 foreach f [lsort [glob rtl/sid/*.sv]] {

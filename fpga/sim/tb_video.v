@@ -44,7 +44,6 @@ module tb_video #(
     wire scs, sras, scas, swe, scke, idone;
 
     sdram_burst u_sd (
-        .hold_bus(1'b1),
         .clk(clk), .rst_n(rst_n),
         .p0_req(m_req), .p0_we(m_we), .p0_addr(m_addr),
         .p0_wdata(m_wdata), .p0_wmask(m_wmask),

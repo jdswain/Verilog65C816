@@ -33,7 +33,6 @@ module tb_sdram_burst;
     wire scs_n, sras_n, scas_n, swe_n, scke;
 
     sdram_burst #(.FREQ(FREQ)) dut (
-        .hold_bus(1'b1),
         .clk(clk), .rst_n(rst_n),
         .p0_req(p0_req), .p0_we(p0_we), .p0_addr(p0_addr),
         .p0_wdata(p0_wdata), .p0_wmask(p0_wmask),

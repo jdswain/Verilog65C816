@@ -44,10 +44,7 @@ module video #(
     // Font image: 4096 bytes, one per line, glyph after glyph (tools/mkfont.py).
     // Synthesis needs an absolute path here, for the same reason the boot ROM
     // does -- see rom_path.vh. The default suits a simulation run from fpga/.
-    parameter FONT_HEX = "rom/font_st8x16.hex",
-    // 1: drop the fetch request for a cycle after each burst, letting the
-    // CPU in (see the fetch engine). 0: ask again at once, as before 7725fee.
-    parameter YIELD = 1
+    parameter FONT_HEX = "rom/font_st8x16.hex"
 ) (
     // memory-side domain
     input  wire        clk,
@@ -80,16 +77,7 @@ module video #(
 
     // 0 = graphics, 1 = text. Memory domain; each side samples it at the top
     // of a frame, so a change never lands part-way down the screen.
-    input  wire        text_mode,
-
-    // The fetch engine's counts and state, read at $0390-$039F (soc.v), so
-    // software can watch it while the picture is wrong.
-    output wire [127:0] dbg,
-    // The number of non-black pixels in the last frame, and one pixel of it
-    // as it left the palette -- {colour index, red, green, blue}, the
-    // 400000th displayed -- for $03A0-$03AB (pixel domain, read unsynchronised).
-    output reg  [23:0]  lit_pixels,
-    output reg  [31:0]  pix_sample
+    input  wire        text_mode
 );
     localparam integer WORDS_PER_LINE = XGA ? 128 : 80;   // px * 4 bits / 32
     localparam integer WORDS_PER_ROW  = XGA ?  64 : 40;   // cells * 16 bits / 32
@@ -226,8 +214,7 @@ module video #(
                         fetching <= 1'b0;
                     end else begin
                         m_addr <= line_base + wcount;
-                        if (YIELD) resume <= 1'b1;
-                        else       m_req  <= 1'b1;
+                        resume <= 1'b1;
                     end
                 end else if (resume)
                     m_req <= 1'b1;
@@ -236,36 +223,6 @@ module video #(
             end
         end
     end
-
-    //------------------------------------------------------------------
-    // Counts for dbg: frames and lines started, bursts finished, and the
-    // last word the controller gave the fetch.
-    //------------------------------------------------------------------
-    reg [15:0] n_frames, n_lines;
-    reg [31:0] n_bursts;
-    reg [15:0] last_word;
-    // Underruns: a line (or frame) starting while the previous line's fetch
-    // was still going -- the display then shows what that half held before.
-    reg [15:0] underruns;
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            n_frames  <= 16'd0;
-            n_lines   <= 16'd0;
-            n_bursts  <= 32'd0;
-            last_word <= 16'd0;
-            underruns <= 16'd0;
-        end else begin
-            if (frame_pulse) n_frames <= n_frames + 1'b1;
-            if (line_pulse)  n_lines  <= n_lines + 1'b1;
-            if (fetching & m_done)   n_bursts  <= n_bursts + 1'b1;
-            if (fetching & m_rvalid) last_word <= m_rdata[15:0];
-            if ((line_pulse | frame_pulse) & fetching & ~&underruns)
-                underruns <= underruns + 1'b1;
-        end
-    end
-    assign dbg = {underruns, last_word, 6'd0, fetch_line, wcount,
-                  3'd0, text_mode, fetch_text, resume, m_req, fetching,
-                  n_bursts, n_lines, n_frames};
 
     //------------------------------------------------------------------
     // Palette (written from the memory domain, read from the pixel domain --
@@ -380,54 +337,12 @@ module video #(
     wire [3:0] colour    = !pix_text ? nib_q :
                            glyph_bit ? attr_q[3:0] : attr_q[7:4];
 
-    reg [3:0] colour_r;               // the index behind red/green/blue
     always @(posedge clk_pix) begin
-        colour_r <= colour;
         {red, green, blue} <= de_q ? {pal_r[colour], pal_g[colour], pal_b[colour]}
                                    : 24'h000000;
         de    <= de_q;
         hsync <= hs_q;
         vsync <= vs_q;
-    end
-
-    // Pixels sent that are not black, frame by frame, for lit_pixels, and
-    // the sample for pix_sample.
-    // Also a check on the frame itself: clocks per frame and active pixels
-    // per frame must be exactly the mode's, every frame. A frame that was
-    // not sets a sticky flag, in pix_sample's top bits (bit 31 wrong length,
-    // bit 30 wrong active count), from the second frame after reset on.
-    localparam integer FRAME_CLKS = (XGA ? 1344 : 800) * (XGA ? 806 : 525);
-    localparam integer FRAME_PIX  = (XGA ? 1024 : 640) * (XGA ? 768 : 480);
-    reg [23:0] lit_count, de_count, clk_count;
-    reg        bad_len, bad_pix, frame_seen;
-    always @(posedge clk_pix or negedge pix_rst_n) begin
-        if (!pix_rst_n) begin
-            lit_count  <= 24'd0;
-            de_count   <= 24'd0;
-            clk_count  <= 24'd0;
-            bad_len    <= 1'b0;
-            bad_pix    <= 1'b0;
-            frame_seen <= 1'b0;
-            lit_pixels <= 24'd0;
-            pix_sample <= 32'd0;
-        end else if (t_frame_start) begin
-            lit_pixels <= lit_count;
-            lit_count  <= 24'd0;
-            de_count   <= 24'd0;
-            clk_count  <= 24'd0;
-            frame_seen <= 1'b1;
-            if (frame_seen && clk_count != FRAME_CLKS - 1) bad_len <= 1'b1;
-            if (frame_seen && de_count  != FRAME_PIX)      bad_pix <= 1'b1;
-            pix_sample[31:30] <= {bad_len, bad_pix};
-        end else begin
-            clk_count <= clk_count + 1'b1;
-            if (de) begin
-                de_count <= de_count + 1'b1;
-                if (|{red, green, blue}) lit_count <= lit_count + 1'b1;
-                if (de_count == 24'd400000)
-                    pix_sample[29:0] <= {2'd0, colour_r, red, green, blue};
-            end
-        end
     end
 endmodule
 

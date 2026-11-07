@@ -94,12 +94,9 @@ module soc #(
 ) (
     input  wire       clk,
     input  wire       rst_n,
-    input  wire [4:0] rst_cause,     // sticky since configuration, read at $0381
-    input  wire [111:0] diag,        // PLL drop counts and times, $0382-$038F
     input  wire       rxd,
     output wire       txd,
     output wire       led,           // heartbeat, active high
-    output reg        hdmi_kick,     // toggles on each write of $A5 to $0381
     // Debug taps: let a wrapper watch what the CPU is doing without depending
     // on the serial port working.
     output wire [23:0] dbg_addr,
@@ -345,121 +342,20 @@ module soc #(
     //           1 = text, 80x30 (128x48 at 1024x768)
     //   bit 7   read only: 0 = 640x480, 1 = 1024x768 (the build's, XGA)
     //
-    // $0381, read only: what has happened since the FPGA was configured, for
-    // finding a board that resets or loses its picture by itself. Each bit
-    // stays set until the FPGA is configured again; S1 does not clear it.
-    //
-    //   bit 0   the system PLL has lost lock (and so reset the SoC)
-    //   bit 1   the video PLL has lost lock (the picture, and the SoC, reset)
-    //   bit 2   S1 has been pressed
-    //   bit 3   the HDMI serializers' reset has been asserted again after
-    //           its first release (a kick, or the video PLL's lock)
-    //   bit 4   the pixel domain's reset has (S1 does that too)
-    //
-    // Writing $A5 to $0381 resets the HDMI output stage alone.
-    //
-    // $0382-$038F, read only, for the same hunt (top_tang20k.v): the system
-    // and video PLLs' counts of drops in lock ($0382, $0383, saturating at
-    // 255); the crystal clock's edges in the latest video frame ($0384-$0386,
-    // 20 bits low byte first: 451,360 at 1024x768, 450,000 at 640x480, if
-    // the clock input is clean) and the frames so far whose count was off by
-    // more than two ($0387, saturating); then the time of the system PLL's
-    // latest drop ($0388-$038B) and now ($038C-$038F), each 32 bits low byte
-    // first in units of 9.48 us since configuration. They come from the
-    // crystal's clock domain unsynchronised, so read a value twice.
-    //
-    // $0390-$039F, read only: the video fetch engine (video.v's dbg) --
-    // frames started ($0390-1), lines started ($0392-3), bursts finished
-    // ($0394-7), state ($0398: bit 0 fetching, 1 request, 2 resume, 3 the
-    // frame being fetched is text, 4 text mode set), words of the current
-    // line ($0399), the line being fetched ($039A-B) and the last word the
-    // SDRAM gave it ($039C-F). Counts wrap; each is low byte first.
-    //
-    // $03A0-$03AF, read only: the pixels sent in the last frame that were not
-    // black ($03A0-2, from the pixel domain unsynchronised), the number of
-    // palette writes since reset ($03A4-5), the latest one's offset in
-    // $0240-$027F and byte ($03A6, $03A7), and one pixel of the last frame
-    // as it left the palette -- blue, green, red, colour index at $03A8-$03AB
-    // (pixel domain). Then the writes to $0381-$03BF since configuration,
-    // which nothing but a test should make, saturating ($03AC-D), and the
-    // latest one's byte and offset ($03AE, $03AF); S1 does not clear them.
-    // $03B0 bit 0 is the SDRAM bus-hold switch (above); $03B1-$03BF read 0.
-    //
-    // If the board has reconfigured itself from flash -- a brown-out does
-    // that -- bit 7 of $0380 shows the flash build's resolution instead.
+    // Only $0380 itself is a register; $0381-$03BF read as it does and
+    // ignore writes. If the board has reconfigured itself from flash -- a
+    // brown-out does that -- bit 7 shows the flash build's resolution.
     //
     // Both modes read the same memory at $70_0000; the bit only changes how
     // video.v interprets it, and takes effect at the top of the next frame.
     //------------------------------------------------------------------
     reg vid_text;
     always @(posedge clk or negedge rst_n) begin
-        if (!rst_n)                    vid_text <= 1'b0;
-        else if (stb & sel_vid & we & ~addr[0]) vid_text <= wdata[0];
+        if (!rst_n)                                         vid_text <= 1'b0;
+        else if (stb & sel_vid & we & (addr[5:0] == 6'd0)) vid_text <= wdata[0];
     end
 
-    // Writing $A5 to $0381 resets the HDMI output stage alone -- the TMDS
-    // encoders and serialisers, not the picture -- for finding a picture lost
-    // there. top_tang20k.v turns each toggle into a reset in the pixel domain.
-    // Only $A5, so that a stray write cannot do it.
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n)                                   hdmi_kick <= 1'b0;
-        else if (stb & sel_vid & we & (addr[5:0] == 6'd1) & (wdata == 8'hA5))
-            hdmi_kick <= ~hdmi_kick;
-    end
-
-    // $03B1 and $03B2 read 0. They were the HDMI serializers' reset lag and
-    // 5x clock phase while the 1024x768 sync loss was being found (Nov 2026;
-    // top_tang20k.v, video_pll.v); the fix made both irrelevant.
-
-    // $03B0 bit 0: the SDRAM controller holds the data bus between operations
-    // (sdram_burst.v, hold_bus). On after reset; a test can turn it off to
-    // compare. Reads back.
-    reg bus_hold;
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n)                                        bus_hold <= 1'b1;
-        else if (stb & sel_vid & we & (addr[5:0] == 6'h30)) bus_hold <= wdata[0];
-    end
-
-    // Writes to $0381-$03BF, which nothing but a test should make: how many,
-    // and the latest, for $03AC-$03AF. Not reset, so that they survive S1.
-    reg [15:0] vreg_writes = 16'd0;
-    reg [13:0] vreg_last   = 14'd0;
-    always @(posedge clk)
-        if (stb & sel_vid & we & (addr[5:0] != 6'd0)) begin
-            if (~&vreg_writes) vreg_writes <= vreg_writes + 1'b1;
-            vreg_last <= {addr[5:0], wdata};
-        end
-
-    reg  [4:0] cause_s1, cause_s2;   // into this clock domain
-    always @(posedge clk) begin
-        cause_s1 <= rst_cause;
-        cause_s2 <= cause_s1;
-    end
-    wire [127:0] vid_dbg;            // video.v's fetch counts, $0390-$039F
-    wire [23:0]  lit_pixels;         // video.v's non-black pixels, $03A0-$03A2
-    wire [31:0]  pix_sample;         // video.v's sampled pixel, $03A8-$03AB
-    reg  [15:0]  pal_writes;         // palette writes since reset
-    reg  [13:0]  pal_last;           // the latest: offset, byte
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            pal_writes <= 16'd0;
-            pal_last   <= 14'd0;
-        end else if (stb & sel_pal & we) begin
-            pal_writes <= pal_writes + 1'b1;
-            pal_last   <= {addr[5:0], wdata};
-        end
-    end
-    wire [95:0] vid_dbg2 = {pix_sample, pal_last[7:0], 2'd0, pal_last[13:8],
-                            pal_writes, 8'd0, lit_pixels};
-    wire [31:0] vreg_dbg = {2'd0, vreg_last[13:8], vreg_last[7:0], vreg_writes};
-    reg  [5:0] r_vreg;               // which register of the block (set below)
-    wire [7:0] vid_q = r_vreg == 6'd0 ? {XGA != 0, 6'd0, vid_text}
-                     : r_vreg == 6'd1 ? {3'd0, cause_s2}
-                     : r_vreg[5]      ? (r_vreg[4] ? (r_vreg[3:0] == 4'd0 ? {7'd0, bus_hold} : 8'd0)
-                                         : r_vreg[3:2] == 2'b11 ? vreg_dbg[r_vreg[1:0] * 8 +: 8]
-                                         : vid_dbg2[r_vreg[3:0] * 8 +: 8])
-                     : r_vreg[4]      ? vid_dbg[r_vreg[3:0] * 8 +: 8]
-                     :                  diag[(r_vreg[3:0] - 4'd2) * 8 +: 8];
+    wire [7:0] vid_q = {XGA != 0, 6'd0, vid_text};
 
 
     // A ROM word already in the buffer answers in the same cycle.
@@ -630,20 +526,16 @@ module soc #(
                 .hsync(vid_hsync), .vsync(vid_vsync), .de(vid_de),
                 .pal_we(stb & sel_pal & we), .pal_idx(addr[5:2]),
                 .pal_sel(addr[1:0]), .pal_byte(wdata),
-                .text_mode(vid_text),
-                .dbg(vid_dbg), .lit_pixels(lit_pixels), .pix_sample(pix_sample)
+                .text_mode(vid_text)
             );
         end else begin : g_no_video
             assign v_req = 1'b0; assign v_we = 1'b0; assign v_addr = 21'd0;
             assign v_wdata = 32'd0; assign v_wmask = 4'd0;
             assign vid_red = 8'd0; assign vid_green = 8'd0; assign vid_blue = 8'd0;
             assign vid_hsync = 1'b1; assign vid_vsync = 1'b1; assign vid_de = 1'b0;
-            assign vid_dbg = 128'd0;
-            assign lit_pixels = 24'd0; assign pix_sample = 32'd0;
         end
 
         sdram_burst #(.FREQ(SYS_HZ)) u_sdram (
-            .hold_bus(bus_hold),
             .clk(clk), .rst_n(rst_n),
             .p0_req(v_req), .p0_we(v_we), .p0_addr(v_addr),
             .p0_wdata(v_wdata), .p0_wmask(v_wmask),
@@ -863,7 +755,6 @@ module soc #(
         r_extc <= sel_extc;
         r_sys  <= sel_sys;
         r_vid  <= sel_vid;
-        r_vreg <= addr[5:0];
         r_blt  <= sel_blt;
         r_dma  <= sel_dma;
         r_irq  <= sel_irq;
