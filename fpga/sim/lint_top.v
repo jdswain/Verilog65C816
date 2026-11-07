@@ -22,7 +22,7 @@ module lint_top;
     wire ext_sel_en_n, ext_rd_n, ext_wr_n, ext_res_n, dma_tc;
 
     top_tang20k dut (
-        .clk(1'b0), .rst(1'b1), .led(led),
+        .clk(1'b0), .rst(1'b1), .led(led), .pwr_key_n(1'b1),
         .uart_tx(uart_tx), .uart_rx(1'b1),
         .O_sdram_clk(sclk), .O_sdram_cke(scke), .O_sdram_cs_n(scs),
         .O_sdram_cas_n(scas), .O_sdram_ras_n(sras), .O_sdram_wen_n(swen),

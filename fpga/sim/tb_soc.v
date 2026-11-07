@@ -81,7 +81,7 @@ module tb_soc #(
 
     soc #(.ROM_HEX(ROM_HEX), .DIVISOR(DIVISOR), .SYS_HZ(SYS_HZ), .XGA(XGA),
           .MAP(MAP), .ROM_BITS(ROM_BITS), .ROM_BASE(ROM_BASE)) dut (
-        .clk(clk), .rst_n(rst_n), .rxd(rxd), .txd(txd), .led(led),
+        .clk(clk), .rst_n(rst_n), .rxd(rxd), .txd(txd), .led(led), .pwr_key_n(1'b1),
         .dbg_addr(), .dbg_vld(), .dbg_we(), .dbg_stopped(),
         .dbg_cache_hits(), .dbg_cache_misses(),
         .sdram_a(sa), .sdram_ba(sba), .sdram_dq(sdq), .sdram_dqm(sdqm),

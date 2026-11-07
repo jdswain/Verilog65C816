@@ -785,7 +785,7 @@ well as the UART.
 | 85 | `dma_tc` | Sch, Built | unused | SD D1, with a 10k pull-up. The same. |
 | 81, 82, 83, 84 | SD card: chip select, MOSI, SCLK, MISO | Sch, Built | unused | The microSD slot's D3, CMD, CLK and D0, in SPI mode. See [SD card](#sd-card). |
 | 51, 54, 55, 56 | sound | Sch, Built | unused | The onboard I2S amplifier. See [Sound](#sound). |
-| 53 | `pwr_key_n`, the power key | Sch | spare | DDC clock. A Schottky from ADB pin 2 pulls it low while the key is down; the 2.2k DDC pull-up on the Tang Nano is its pull-up. A press also pulls the monitor's DDC clock low, which is harmless with no transfer under way. See [Power](#power). |
+| 53 | `pwr_key_n`, the power key | Sch, Built | spare | DDC clock. A Schottky from ADB pin 2 pulls it low while the key is down; the 2.2k DDC pull-up on the Tang Nano is its pull-up. A press also pulls the monitor's DDC clock low, which is harmless with no transfer under way. See [Power](#power). |
 
 ### Spare or not usable
 

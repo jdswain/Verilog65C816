@@ -14,8 +14,19 @@ IO_PORT "rst" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;   // S1 is active HIGH
 
 // Only one LED is left. The other five pins (15-19) went to the external
 // peripheral bus, which needs 20 and the board has barely that many free.
+// It is the power LED, and on the carrier also the soft-power off line: a
+// capacitor and diode pump there turn a fast toggle (about 10 kHz, power.v)
+// into the supply's off. Steady or a slow blink only; never PWM it.
 IO_LOC  "led" 20;
 IO_PORT "led" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+
+// The carrier's power key, through a Schottky from ADB pin 2: low while the
+// key is down. Pin 53 is the HDMI DDC clock, the 3.3V side of the Tang
+// Nano's level shifter with its 2.2k pull-up, so it reads up without the
+// carrier; a press also pulls the monitor's DDC clock low, harmless with no
+// transfer under way. DDC data (52) is the last spare pin.
+IO_LOC  "pwr_key_n" 53;
+IO_PORT "pwr_key_n" IO_TYPE=LVCMOS33 PULL_MODE=UP;
 
 //----------------------------------------------------------------------
 // External peripheral bus (external_bus.v). 20 pins, scraped together from

@@ -26,7 +26,8 @@ module top_tang20k #(
 ) (
     input  wire       clk,          // 27 MHz crystal
     input  wire       rst,          // S1: idle low, HIGH when pressed
-    output wire       led,          // active low
+    output wire       led,          // active low: the power LED and the soft-power off line (power.v)
+    input  wire       pwr_key_n,    // the carrier's power key, low while down (FPGA 53, DDC clock)
     output wire       uart_tx,      // to BL616 (FPGA -> host)
     input  wire       uart_rx,      // from BL616 (host -> FPGA)
     // In-package SDRAM. These port names are reserved: the Gowin tools connect
@@ -246,7 +247,7 @@ module top_tang20k #(
         .rst_n(rst_n),
         .rxd(uart_rx),
         .txd(uart_tx),
-        .led(led_active_high),
+        .led(led_active_high), .pwr_key_n(pwr_key_n),
         .dbg_addr(), .dbg_vld(), .dbg_we(), .dbg_stopped(),
         .dbg_cache_hits(), .dbg_cache_misses(),
         .sdram_a(O_sdram_addr), .sdram_ba(O_sdram_ba), .sdram_dq(IO_sdram_dq),

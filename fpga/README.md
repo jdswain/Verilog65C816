@@ -88,7 +88,8 @@ window for the external bus:
 | `$0440`-`$044F` | interrupt status and mask (see [Interrupts and the tick timer](#interrupts-and-the-tick-timer----0440)) |
 | `$0450`-`$045F` | tick timer |
 | `$0460`-`$047F` | `$0440`-`$045F` repeated |
-| `$0480`-`$04FF` | unclaimed, reads `$FF` |
+| `$0480`-`$04BF` | soft power and the power LED (see [Power](#power----0480)) |
+| `$04C0`-`$04FF` | unclaimed, reads `$FF` |
 | `$0500`-`$057F` | sound: two SIDs and a control register (see [Sound](#sound)) |
 | `$0580`-`$07FF` | unclaimed, reads `$FF` |
 | `$0800`-`$0FFF` | external bus window: 8 slots x 16 registers |
@@ -423,7 +424,7 @@ the chips that are; `$0441` chooses which of them reach the line.
 
 | Address | Register |
 |---|---|
-| `$0440` | ISTAT, read only: 0 the tick timer, 1 DMA channel 0, 2 DMA channel 1, 3 the cards' `IRQ#`, 4 the SCC |
+| `$0440` | ISTAT, read only: 0 the tick timer, 1 DMA channel 0, 2 DMA channel 1, 3 the cards' `IRQ#`, 4 the SCC, 5 the power key (`$0480`, which has its own enable, off at reset) |
 | `$0441` | IMASK: 1 = that source reaches `IRQ`; `$FF` at reset |
 
 Bit 4 is the SCC emulated in the FPGA. The real Z85C80 on the carrier will
@@ -472,6 +473,53 @@ irq     lda $0440               ; who is asking?
 ```
 
 `make timertest` builds a ROM that checks both on IRQ. It prints `timer: ok`.
+
+### Power -- `$0480`
+
+The carrier switches its ATX supply with a latch on the supply's standby
+rail (the 65-16 Power sheet, `docs/Hardware.md`). The ADB power key, or a
+case button, turns it on. The FPGA turns it off through its one LED pin
+(pin 20): a capacitor and diode pump on the carrier turn a burst of about
+10 kHz into the latch's clear, and nothing slower gets through. So the LED
+is the **power LED**, steady from reset, and the same pin is the off line.
+`rtl/power.v` keeps the two apart:
+
+* The LED pin changes at most once every 16 ms however fast software writes
+  CONTROL, so a runaway loop can never reach the pump. Only OFF can.
+* The power key comes in on pin 53 (the HDMI DDC clock, pulled up on the
+  board), low while the key is down. Without the carrier it reads up.
+* Holding the key for 4 seconds turns the supply off in hardware, whatever
+  the CPU is doing.
+* A key held since reset (the press that switched the supply on, still
+  down while the FPGA configures) counts for nothing until it is let go:
+  no KEY, no PRESSED, no hold.
+
+| Address | Register |
+|---|---|
+| `$0480` | STATUS. Read: bit 0 KEY, the key is down (debounced, 10 ms); bit 1 PRESSED, set when the key goes down; bit 7 OFF, the off burst is running. Write 1 to bit 1 to clear PRESSED |
+| `$0481` | CONTROL: bit 0 LED, 1 = lit (`$01` at reset); bit 1 BLINK, the LED flashes at about 1 Hz instead; bit 2 IE, PRESSED raises ISTAT bit 5 |
+| `$0482` | OFF: writing `$A5` turns the supply off (50 ms of the 10 kHz toggle). Other values are ignored; reads 0 |
+| `$0483` | reads 0 |
+
+The four repeat through `$0480`-`$04BF`. After the burst the LED follows
+CONTROL again, so on a board where the supply stays on (the soft-power parts
+not fitted, or JP4's shunt in) nothing else happens. The keyboard also
+reports the power key over ADB; the case button reaches only PRESSED.
+
+```
+        lda #2
+        sta $0480               ; clear PRESSED
+        lda #5
+        sta $0481               ; LED on, IE: the key interrupts (ISTAT bit 5)
+        ...
+off     lda #$a5
+        sta $0482               ; the supply goes off
+```
+
+`sim/tb_power.v` checks the key, PRESSED and IE, the hold, OFF, the LED's
+rate limit and the blink at a scaled-down time:
+`iverilog -g2005 -o /tmp/tb_power sim/tb_power.v rtl/power.v && vvp /tmp/tb_power`
+prints `power: ok`. Nothing has run on a carrier yet.
 
 ### External bus
 
@@ -609,7 +657,7 @@ What is available, most usable first:
 | 80, 85 | header | SD card 4-bit mode (SPI mode still works); 10k pull-ups |
 | 79 | header | the RGB LED (WS2812); 5.1k pull-down |
 | 51, 54, 55, 56 | header | the audio amplifier; 54-56 need "SSPI as regular I/O" |
-| 52, 53 | header | HDMI DDC (EDID); 2.2k pull-ups, and the monitor is on the lines |
+| 52, 53 | header | HDMI DDC (EDID); 2.2k pull-ups, and the monitor is on the lines. 53 is now the carrier's power key |
 | 81-84 | microSD slot only | the SD card entirely; needs a microSD breakout |
 
 So one pin is free today, nine without any adapter, eleven counting the DDC
@@ -1972,7 +2020,7 @@ source; the R6501Q target still assembles byte-for-byte to the Rockwell ROMs.
 
 ### Housekeeping
 
-* Only **one LED** is left (pin 20, heartbeat). The other five went to the
+* Only **one LED** is left (pin 20, the power LED: see [Power](#power----0480)). The other five went to the
   external bus, which needs 20 pins and the board has barely that many free.
   `test/blinky.v` and `test/btntest.v` still declare `led[5:0]` and will not
   place against the current `.cst`.

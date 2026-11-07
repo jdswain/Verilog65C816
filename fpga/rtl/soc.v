@@ -31,7 +31,8 @@
 //   $03C0-$03FF   blitter (blitter.v)
 //   $0400-$043F   DMA engine (dma.v)
 //   $0440-$047F   interrupt status and mask, tick timer (timer.v)
-//   $0480-$04FF   unclaimed, reads $FF
+//   $0480-$04BF   soft power and the power LED (power.v)
+//   $04C0-$04FF   unclaimed, reads $FF
 //   $0500-$057F   sound: two SIDs and a control register (sound.v)
 //   $0580-$07FF   unclaimed, reads $FF
 //   $0800-$0FFF   external bus window -- 4 cards x 16 registers:
@@ -96,7 +97,8 @@ module soc #(
     input  wire       rst_n,
     input  wire       rxd,
     output wire       txd,
-    output wire       led,           // heartbeat, active high
+    output wire       led,           // the power LED and soft-power off line, active high
+    input  wire       pwr_key_n,     // the power key, low while down (power.v)
     // Debug taps: let a wrapper watch what the CPU is doing without depending
     // on the serial port working.
     output wire [23:0] dbg_addr,
@@ -177,6 +179,7 @@ module soc #(
     wire        ext_irq;
     wire [1:0]  dma_irq;
     wire        tmr_irq;
+    wire        pwr_irq;
 
     //------------------------------------------------------------------
     // Interrupt status and mask, $0440
@@ -185,7 +188,8 @@ module soc #(
     // the SCC share the 816's single IRQ line. $0440 shows which of them is
     // asking, so the handler reads one register before going to the chips:
     //   $0440 ISTAT (read)  0 timer, 1 DMA channel 0, 2 DMA channel 1,
-    //                       3 cards, 4 SCC; each is the source's own level
+    //                       3 cards, 4 SCC, 5 the power key (power.v, with
+    //                       its own enable); each is the source's own level
     //                       (cleared at the source), before the mask. Bit
     //                       4 is the emulated SCC; the real one will be on
     //                       the card line, bit 3
@@ -197,7 +201,7 @@ module soc #(
     // merge costs nothing and keeps the extra gates out of the CPU's own
     // logic.
     //------------------------------------------------------------------
-    wire [7:0] istat = {3'd0, ~scc_int_n, ext_irq, dma_irq, tmr_irq};
+    wire [7:0] istat = {2'd0, pwr_irq, ~scc_int_n, ext_irq, dma_irq, tmr_irq};
     reg  [7:0] imask;
     reg irq_n;
     always @(posedge clk or negedge rst_n) begin
@@ -271,6 +275,7 @@ module soc #(
     wire sel_blt  = io_lo & (addr[10:6] == 5'd15);           // $03C0-$03FF
     wire sel_dma  = io_lo & (addr[10:6] == 5'd16);           // $0400-$043F
     wire sel_irq  = io_lo & (addr[10:6] == 5'd17);           // $0440-$047F
+    wire sel_pwr  = io_lo & (addr[10:6] == 5'd18);           // $0480-$04BF
     wire sel_snd  = io_lo & (addr[10:7] == 4'b1010);         // $0500-$057F
     wire sel_r6501 = (MAP == MAP_FORTH) & bank0 & (addr[15:8] == 8'h00)
                    & (addr[7:0] >= 8'h15) & (addr[7:0] <= 8'h17);
@@ -623,6 +628,18 @@ module soc #(
     );
 
     //------------------------------------------------------------------
+    // Soft power and the power LED, $0480 (power.v)
+    //------------------------------------------------------------------
+    wire [7:0] pwr_q;
+
+    power #(.SYS_HZ(SYS_HZ)) u_pwr (
+        .clk(clk), .rst_n(rst_n),
+        .reg_addr(addr[1:0]), .wdata(wdata), .rdata(pwr_q),
+        .cs(stb & sel_pwr), .we(we),
+        .key_n(pwr_key_n), .led(led), .irq(pwr_irq)
+    );
+
+    //------------------------------------------------------------------
     // External peripheral bus
     //
     // The window is $0800-$0FFF: eight slots of 16 registers, addr[6:4] the
@@ -744,7 +761,7 @@ module soc #(
     // The SD card's DATA and NEXT are read from its own register, not
     // captured on the strobe: an access that waits gets the byte at the end.
     //------------------------------------------------------------------
-    reg r_ser, r_adb, r_extc, r_sys, r_vid, r_blt, r_dma, r_irq, r_snd, r_none;
+    reg r_ser, r_adb, r_extc, r_sys, r_vid, r_blt, r_dma, r_irq, r_snd, r_pwr, r_none;
     reg r_sd, r_sdrx;
 
     always @(posedge clk) if (stb) begin
@@ -759,22 +776,25 @@ module soc #(
         r_dma  <= sel_dma;
         r_irq  <= sel_irq;
         r_snd  <= sel_snd;
+        r_pwr  <= sel_pwr;
         r_sd   <= sel_sd;
         r_sdrx <= ~addr[1];
         r_none <= ~(sel_ser | sel_adb | sel_extc | sel_sys | sel_vid | sel_blt
-                    | sel_dma | sel_irq | sel_snd | sel_sd);
+                    | sel_dma | sel_irq | sel_snd | sel_pwr | sel_sd);
     end
 
-    // The ADB host's, the blitter's, the DMA engine's and $0440's read data
-    // are combinational from the address, which put address -> device mux ->
-    // rdata -> ALU back on the critical path. Capture them on the strobe.
-    reg [7:0] adb_q_r, blt_q_r, dma_q_r, irq_q_r, sd_q_r;
+    // The ADB host's, the blitter's, the DMA engine's, $0440's and $0480's
+    // read data are combinational from the address, which put address ->
+    // device mux -> rdata -> ALU back on the critical path. Capture them on
+    // the strobe.
+    reg [7:0] adb_q_r, blt_q_r, dma_q_r, irq_q_r, pwr_q_r, sd_q_r;
     always @(posedge clk) if (stb) begin
         sd_q_r  <= sd_q;
         adb_q_r <= adb_q;
         blt_q_r <= blt_q;
         dma_q_r <= dma_q;
         irq_q_r <= irq_q;
+        pwr_q_r <= pwr_q;
     end
 
     wire [7:0] io_q = ({8{r_ser}}  & ser_q)
@@ -786,6 +806,7 @@ module soc #(
                     | ({8{r_dma}}  & dma_q_r)
                     | ({8{r_irq}}  & irq_q_r)
                     | ({8{r_snd}}  & snd_q)
+                    | ({8{r_pwr}}  & pwr_q_r)
                     | ({8{r_sd}}   & (r_sdrx ? sd_rx : sd_q_r))
                     | {8{r_none}};
 
@@ -803,17 +824,9 @@ module soc #(
         else              begin rdata32 = sdram_q32; r32 = 1'b1;  end
     end
 
-    //------------------------------------------------------------------
-    // Status LEDs
-    //------------------------------------------------------------------
-    reg [23:0] heartbeat;
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) heartbeat <= 24'd0;
-        else        heartbeat <= heartbeat + 1'b1;
-    end
-
-    // Only one LED survives: the other five pins went to the external bus.
-    assign led = heartbeat[23];
+    // The one LED left (the other five pins went to the external bus) is the
+    // power LED, driven by power.v above: steady, not the old heartbeat,
+    // because a fast-toggling LED pin turns the carrier's supply off.
 
     assign dbg_addr    = addr;
     assign dbg_vld     = vld;

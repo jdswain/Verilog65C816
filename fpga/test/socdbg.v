@@ -27,7 +27,7 @@ module socdbg (
 
     soc #(.ROM_HEX(`ROM_HEX_PATH), .FONT_HEX(`FONT_HEX_PATH), .DIVISOR(DIVISOR),
           .MAP(`ROM_MAP), .ROM_BITS(`ROM_BITS_DEF), .ROM_BASE(`ROM_BASE_DEF)) u_soc (
-        .clk(clk), .rst_n(rst_n), .rxd(1'b1), .txd(soc_txd), .led(soc_led),
+        .clk(clk), .rst_n(rst_n), .rxd(1'b1), .txd(soc_txd), .led(soc_led), .pwr_key_n(1'b1),
         .dbg_addr(dbg_addr), .dbg_vld(dbg_vld), .dbg_we(dbg_we),
         .dbg_stopped(dbg_stopped)
     );
