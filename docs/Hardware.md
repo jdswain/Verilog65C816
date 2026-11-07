@@ -38,8 +38,8 @@ Each item is marked:
 | Sound, two SIDs | reDIP SID emulation | FPGA, onboard I2S amplifier; stereo DAC optional on the carrier | Built |
 | Ethernet | ENC424J600, parallel mode 5 | Carrier, on the external bus, select 5 | Drawn |
 | SD card, a test boot device | `sd_spi.v`, SPI mode | The Tang Nano's microSD slot | Built; untested on the board |
-| Power | 24-pin ATX header; +5V, +3.3V, +12V, -12V from the supply | Carrier | Drawn |
-| Encryption engine, keyboard power-on | | | Open |
+| Power | 24-pin ATX header; +5V, +3.3V, +12V, -12V from the supply; soft power from the ADB power key | Carrier | Drawn |
+| Encryption engine | | | Open |
 
 The TIM bus as such is not implemented, but the carrier has one slot in the
 Apple II form carrying the Intel bus, for test points and cards built for it;
@@ -559,9 +559,8 @@ proposed earlier. Source: DS39935C.
 
 The alternative was its SPI port, on the microSD slot's SPI lines with a
 spare pin as chip select. It was rejected: the slot's four pins (81-84) are
-not on the edge headers, and the only spare pins are the DDC level-shifter
-side (52, 53), CEC (25) and the LED (20), three of which share wires with
-the monitor.
+not on the edge headers, and the only spare pins are DDC data (52) and CEC
+(25), both of which share wires with the monitor.
 
 ## Slot
 
@@ -585,7 +584,7 @@ side:
 `PHI0`, `RDY`, `/NMI`, `/DMA`, `/INH`, `-5V` and the clocks are not
 connected. A 68881 on a card would need its `DSACK` handshake honoured, which
 means a wait input into the bridge; `RDY` is wired to nothing because no FPGA
-pin is spare for it, and one of the DDC pins is the only candidate.
+pin is spare for it, and DDC data (52), the last spare, is the only candidate.
 
 ## SD card
 
@@ -639,8 +638,8 @@ milliseconds between transactions, and the controller enforces this (see
   * Pin 2 is power-on, the keyboard power key.
   * Pin 3 is +5V.
   * Pin 4 is ground.
-* **Keyboard power-on (Open):** the power key pulls pin 2 low. Nothing reads
-  it yet.
+* **Keyboard power-on (Drawn):** the power key pulls pin 2 low. That turns
+  the supply on, and the FPGA reads it on pin 53; see [Power](#power).
 
 ## Power
 
@@ -657,8 +656,30 @@ ATX supply. The supply provides every rail, so the carrier has no regulator:
 The budget at 5V is about 2A typical and 3 to 4A with two floppies spinning
 up (the Tang Nano 0.3 to 0.5A, chips and logic 0.3A, ADB up to 0.5A,
 TERMPWR up to 0.9A, two drives 1.5A at spin-up); 12V is drawn only by a
-vintage SCSI disk. `PS_ON#` goes to a two-pin header: a shunt for always-on,
-or a switch.
+vintage SCSI disk. `PS_ON#` goes to a two-pin header, JP4: a shunt holds the
+supply on, for bring-up or when the soft-power parts are not fitted.
+
+**Soft power (Drawn, optional to fit):** the ADB power key turns the supply
+on, as on a Mac, and the FPGA turns it off.
+* **Latch:** half a 74HC74 on +5VSB, the ATX standby rail, which is live
+  whenever the supply has mains. Its Q drives a 2N7002 that pulls `PS_ON#`
+  low.
+* **On:** the power key pulls ADB pin 2 (`~PSW`) low; a two-pin header, J13,
+  takes a case button in parallel. An RC turns the press into a short set
+  pulse, so only the press edge sets the latch and a held key cannot keep
+  the supply on.
+* **Off:** the FPGA toggles pin 20, the Tang Nano's LED, at about 10 kHz for
+  20 ms or more. A capacitor and a BAT54S diode pump charge a gate capacitor
+  and a 2N7002 clears the latch. Only a fast toggle gets through: a steady
+  level, the slow heartbeat, a floating pin while the FPGA configures or an
+  unpowered Tang Nano cannot turn the supply off. The LED therefore works as
+  a power LED (active low, on while running). **Never PWM it.**
+* **Mains on:** an RC on the latch's clear input starts it cleared, so the
+  supply starts off.
+* **Key sense:** a Schottky from ADB pin 2 to pin 53, so the FPGA can see
+  the key without 5V reaching it. The keyboard also reports the power key
+  over ADB, so the OS can shut down cleanly and then turn the supply off;
+  the FPGA can force it off after a long hold.
 
 **The Tang Nano's 5V pin is USB VBUS itself.** Measured on the board with
 only USB connected: 5.18V, with no diode on the Tang Nano. The carrier
@@ -731,7 +752,7 @@ Sources:
 |---|---|---|---|
 | 4 | `clk`, 27 MHz | Built | |
 | 87 | `rst`, button S1 | Built, Board | Active **high** |
-| 20 | `led` | Built | The one LED left |
+| 20 | `led` | Built | The one LED left, active low. On the carrier it is also the soft-power off line: toggling it at about 10 kHz for 20 ms turns the supply off, so a steady level or a slow blink only. Never PWM it. See [Power](#power). |
 | 69, 70 | `uart_tx`, `uart_rx` | Built | To the BL616 |
 | 33-40 | HDMI, four TMDS pairs | Built | |
 | 27 | `adb_drive` | Built, Board | LCD B7 on the schematic; nothing else on it |
@@ -764,19 +785,20 @@ well as the UART.
 | 85 | `dma_tc` | Sch, Built | unused | SD D1, with a 10k pull-up. The same. |
 | 81, 82, 83, 84 | SD card: chip select, MOSI, SCLK, MISO | Sch, Built | unused | The microSD slot's D3, CMD, CLK and D0, in SPI mode. See [SD card](#sd-card). |
 | 51, 54, 55, 56 | sound | Sch, Built | unused | The onboard I2S amplifier. See [Sound](#sound). |
+| 53 | `pwr_key_n`, the power key | Sch | spare | DDC clock. A Schottky from ADB pin 2 pulls it low while the key is down; the 2.2k DDC pull-up on the Tang Nano is its pull-up. A press also pulls the monitor's DDC clock low, which is harmless with no transfer under way. See [Power](#power). |
 
 ### Spare or not usable
 
 | Pin | Status |
 |---|---|
-| 52, 53 | Spare, with care: the 3.3V side of 2N7002 level shifters to the monitor's 5V DDC lines, with 2.2k pull-ups to 3.3V (Sipeed schematic rev 3923). An output here drives the monitor's DDC too. |
+| 52 | Spare, with care: DDC data, the 3.3V side of a 2N7002 level shifter to the monitor's 5V DDC line, with a 2.2k pull-up to 3.3V (Sipeed schematic rev 3923). An output here drives the monitor's DDC too. Pin 53, DDC clock, is now the power key. |
 | 32 | Spare, with difficulty: LCD connector only. It needs an FPC breakout, and FPC pins 1-2 carry the backlight boost output. |
 | 26 | Not usable: HDMI hot-plug detect, 2.2k to the connector and 5.1k to ground. It reads low without a monitor asserting hot-plug, which was the cause of the spurious ADB SRQ. It is usable only as that input. |
 | 13 | Not usable: BL616 SPI clock. |
 
-That accounts for 23 external-bus and DMA pins, up from 20, four for sound
-and four for the SD card.
-Two spare pins remain, on the DDC lines; the microSD slot's four are the SD
+That accounts for 23 external-bus and DMA pins, up from 20, four for sound,
+four for the SD card and one for the power key.
+One spare pin remains, DDC data (52); the microSD slot's four are the SD
 card's.
 
 ### Edge headers
@@ -804,11 +826,11 @@ dimension drawing, revision 3921).
 | 13 | 86 | `ext_res_n` | | 13 | 30 | `ext_d[2]` |
 | 14 | 79 | `dma_drq[0]` | | 14 | 31 | `ext_d[0]` |
 | 15 | | GND | | 15 | 17 | `ext_a[2]` |
-| 16 | | +3V3 | | 16 | 20 | `led` |
+| 16 | | +3V3 | | 16 | 20 | `led`, soft-power off |
 | 17 | 72 | `ext_sel[1]` | | 17 | 19 | `ext_irq_n` |
 | 18 | 71 | `ext_sel[0]` | | 18 | 18 | `ext_a[3]` |
-| 19 | 53 | spare (HDMI DDC) | | 19 | | +3V3 |
-| 20 | 52 | spare (HDMI DDC) | | 20 | | GND |
+| 19 | 53 | `pwr_key_n` (HDMI DDC clock) | | 19 | | +3V3 |
+| 20 | 52 | spare (HDMI DDC data) | | 20 | | GND |
 
 * The clock (4), S1 (87), the BL616 UART (69, 70) and HDMI (33-40) stay on
   the Tang Nano and are not on the headers.
@@ -841,6 +863,9 @@ the rest are layout.
 
 - [x] A 24-pin ATX header: +5V (2A typical, 4A peak), +3.3V, +12V and -12V
       from a picoPSU or any SFX/ATX supply; `PS_ON#` on a two-pin header.
+- [x] Soft power: the ADB power key or a case button turns the supply on
+      through a latch on +5VSB; the FPGA turns it off by toggling its LED
+      pin fast.
 - [x] 3.3V for the level shifters and the ENC424J600 from the supply; no
       regulator on the carrier.
 - [x] Decoupling on every chip, bulk capacitance at the ATX header and by
@@ -945,8 +970,7 @@ the rest are layout.
 - [x] A 10k/15k divider with a BAT54S clamp from the ADB line to pin 28.
 - [x] The bus pull-up, 470R to +5V.
 - [x] A 4-pin mini-DIN: data, power key, +5V, ground.
-- [ ] The power key line brought to somewhere it can be read, if keyboard
-      power-on is wanted (**Open**).
+- [x] The power key line: it turns the supply on, and pin 53 reads it.
 
 ### Slot
 
