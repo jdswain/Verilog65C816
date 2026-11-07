@@ -488,8 +488,9 @@ to a 74HCT138 on the carrier, which makes the eight selects:
 | 2 | `$0820`-`$082F` | Z85C80 SCC (emulated in the FPGA for now; the bridge never sees it) |
 | 3 | `$0830`-`$083F` | Z85C80 SCSI (53C80) |
 | 4 | `$0840`-`$084F` | Z85C80 SCSI `/DACK` |
-| 5 | `$0850`-`$085F` | W5100S Ethernet |
-| 6, 7 | `$0860`-`$087F` | spare |
+| 5 | `$0850`-`$085F` | ENC424J600 Ethernet, parallel mode 5: +0 and +2 written set the address latch (`AD8` = 0 or 1), +1 and +3 are data at that address |
+| 6 | `$0860`-`$086F` | the slot's `/DEVSEL` |
+| 7 | `$0870`-`$087F` | the slot's `/IOSEL` |
 
 The enable is low only while the code is steady, so the decoder's outputs
 never glitch; on the 53C80 a glitch on `/DACK` would clear its DMA request.

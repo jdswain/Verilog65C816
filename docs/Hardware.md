@@ -17,6 +17,8 @@ Each item is marked:
 * **Proposed**: decided here but not built.
 * **Open**: still to be decided.
 * **Check**: depends on a datasheet or board fact that hasn't been confirmed.
+* **Drawn**: in the dev board's KiCad schematic (github.com/jdswain/65-16),
+  which is the carrier as it is being built.
 
 ## Summary
 
@@ -25,20 +27,23 @@ Each item is marked:
 | CPU, cache, 8 MB SDRAM, boot ROM | 65C816 core, GW2AR-18 | FPGA | Built |
 | Video, 640x480 HDMI, text and 16-colour graphics | | FPGA | Built |
 | Blitter | | FPGA | Built |
-| Console serial | Z85C30 SCC channel A | Emulated in the FPGA on the BL616 USB bridge; the real chip's RS-232 port optional | Emulation built; it replaced the ACIA |
-| Keyboard and mouse | ADB host | FPGA, plus a transistor and level shifter | Working on a breadboard |
-| Two serial ports (one internal, one external) | Z85C80 SCC half | Carrier | Proposed |
-| SCSI (one internal, one external connector) | Z85C80 SCSI half (53C80) | Carrier | Proposed |
-| Floppy (one internal port, two drives) | 82077AA | Carrier | Proposed |
+| Console serial | Z85C30 SCC channel A | Emulated in the FPGA on the BL616 USB bridge; the real chip's port A is the modem Mini-DIN-8 | Emulation built; it replaced the ACIA |
+| Keyboard and mouse | ADB host | FPGA, plus a transistor and a divider | Working on a breadboard; Drawn |
+| Two serial ports, Mac Mini-DIN-8s at RS-422/423 levels | Z85C80 SCC half, a 26C31 and two 26C32s | Carrier | Drawn |
+| SCSI, an internal 50-pin header and an external DB-25 | Z85C80 SCSI half (53C80) | Carrier | Drawn |
+| Floppy, one 34-pin header for two drives, 2.88 MB capable | 82077AA | Carrier | Drawn |
 | DMA, two channels | | FPGA | Built; untested on the board |
 | Interrupt status and mask | | FPGA | Built |
 | Tick timer, the operating system's clock | | FPGA | Built |
 | Sound, two SIDs | reDIP SID emulation | FPGA, onboard I2S amplifier; stereo DAC optional on the carrier | Built |
-| Ethernet | W5100S | Carrier, on the external bus | Open: proposed below |
+| Ethernet | ENC424J600, parallel mode 5 | Carrier, on the external bus, select 5 | Drawn |
 | SD card, a test boot device | `sd_spi.v`, SPI mode | The Tang Nano's microSD slot | Built; untested on the board |
+| Power | 24-pin ATX header; +5V, +3.3V, +12V, -12V from the supply | Carrier | Drawn |
 | Encryption engine, keyboard power-on | | | Open |
 
-The TIM bus is not implemented.
+The TIM bus as such is not implemented, but the carrier has one slot in the
+Apple II form carrying the Intel bus, for test points and cards built for it;
+see [Slot](#slot).
 
 ## The Z85C80
 
@@ -87,8 +92,8 @@ Source: Zilog Z85C80 product specification.
 ## Voltage levels
 
 **The FPGA's pins are 3.3V and not 5V tolerant.** Everything on the carrier
-except the W5100S runs from 5V: the Z85C80, the 82077AA, the ADB bus and the
-floppy drives. No 5V signal may reach an FPGA pin directly.
+except the ENC424J600 runs from 5V: the Z85C80, the 82077AA, the ADB bus and
+the floppy drives. No 5V signal may reach an FPGA pin directly.
 
 | Signal group | Direction | Part | Notes |
 |---|---|---|---|
@@ -96,16 +101,18 @@ floppy drives. No 5V signal may reach an FPGA pin directly.
 | `ext_a[3:0]`, `RD#`, `WR#`, `RES#`, `TC` | FPGA to carrier | 74HCT541 at 5V (74AHCT541 for less delay) | HCT inputs accept 3.3V, and the outputs swing a full 5V. The eight signals fill it. It also protects the FPGA pins. |
 | Select code and enable | FPGA to carrier | 74HCT138 at 5V | It shifts and decodes in one part. |
 | `DRQ0`, `DRQ1` | carrier to FPGA | 74LVC125A at 3.3V | Inputs are 5V tolerant. |
-| `adb_sense` | carrier to FPGA | A spare 74LVC125A gate, or a 74LVC1G17 | The 1G17's Schmitt input suits the slow edges of a pulled-up ADB cable. See [ADB](#adb). |
+| `adb_sense` | carrier to FPGA | A 10k/15k divider with a BAT54S clamp to 3.3V (Drawn) | 3.0V at a 5V high, so the clamp never conducts. A 74LVC1G17, whose Schmitt input suits the slow edges of a pulled-up ADB cable, is the alternative if they prove a problem; the pin can also take `HYSTERESIS=HIGH`. See [ADB](#adb). |
 | `adb_drive` | FPGA to bus | 2N3904 | See [ADB](#adb). |
 | `ext_irq_n` | carrier to FPGA | Open-drain node pulled up to 3.3V | See [Interrupts](#interrupts). It needs no shifter. |
 
 Nothing else crosses between 3.3V and 5V:
 * The I2S lines to a PCM5102A are 3.3V at both ends.
-* The W5100S runs at 3.3V on the 5V side of the bus. **Check** that its I/O
-  is 5V tolerant.
-* RS-232 on channel A needs line drivers (a MAX3232). That is not a
-  logic-level shift.
+* The ENC424J600 runs at 3.3V on the 5V side of the bus. Its parallel-port
+  pins are 5V tolerant inputs, and its data pins drive 3.3V on reads, which
+  the 74LVC245 reads as a high (DS39935C, section 5.1).
+* The serial ports are RS-422/423 through a 26C31 and two 26C32s at 5V, with
+  the handshake inputs inverted into the SCC by 74HC05 gates. Nothing there
+  reaches the FPGA.
 * The floppy cable needs no drivers: with `INVERT` tied to ground the
   82077AA's own 40 mA outputs and receivers drive it. The drive's
   open-collector outputs need pull-ups (typically 1k).
@@ -147,7 +154,7 @@ PHI0, is dropped, and with it 6502-family peripherals such as the WD1773.
 is permanently `RD#`.
 
 Every planned device is an Intel-bus part: the 82077AA, both halves of the
-Z85C80, and the W5100S.
+Z85C80, and the ENC424J600 in its parallel mode 5.
 
 ### Timing
 
@@ -175,8 +182,9 @@ The timing against the Z85C30's 10 MHz figures:
 * Address to data valid: 180 ns, sampled at about 350 ns.
 
 The 8 MHz grade will be somewhat slower, and the level shifters add 5-20 ns
-each way. **Check** the 8 MHz figures, and the 82077AA, 53C80 and W5100S
-figures, against this table.
+each way. **Check** the 8 MHz figures, and the 82077AA and 53C80 figures,
+against this table. The ENC424J600's parallel-port timings are all under
+10 ns bar a 75 ns read access (DS39935C, Table 17-10), so it is not the limit.
 
 **SCC recovery.** The bridge can start a cycle 13 clocks (516 ns) after the
 last began, and the CPU's back-to-back accesses come about 560 ns apart: both
@@ -195,8 +203,9 @@ Seven selects are needed and the bus has four:
 | 2 | Z85C80 `/SCCCS` |
 | 3 | Z85C80 `/SCSICS` |
 | 4 | Z85C80 `/DACK` |
-| 5 | W5100S `/CS` |
-| 6, 7 | spare |
+| 5 | ENC424J600 `CS`, through the glue that makes it active high |
+| 6 | the slot's `/DEVSEL` |
+| 7 | the slot's `/IOSEL` |
 
 **Built:** the four select pins are a three-bit code plus an active-low
 enable, driving a 74HCT138. That uses the same four pins and gives eight
@@ -226,7 +235,7 @@ that saves a part. With seven selects needed the trade goes the other way.
 | 82077AA | `$0800` | A2-A0 to `ext_a[2:0]` | +0 to +7, the PC/AT layout (SRA, SRB, DOR, TDR, MSR/DSR, FIFO, -, DIR/CCR) |
 | Z85C80 SCC | `$0820` | `D//C` to `ext_a[0]`, `A//B` to `ext_a[1]` | +0 B control, +1 B data, +2 A control, +3 A data |
 | Z85C80 SCSI | `$0830` | A2-A0 to `ext_a[2:0]` | +0 to +7, the 5380 layout |
-| W5100S | `$0850` | A1-A0 to `ext_a[1:0]` | +0 mode, +1 address high, +2 address low, +3 data (indirect bus mode) |
+| ENC424J600 | `$0850` | `ext_a[0]` picks the address latch or data; `ext_a[1]` is `AD8` | +0 write: address low byte with `AD8` = 0 (the SFRs, from 7E00h); +2 write: address low byte with `AD8` = 1 (from 7F00h); +1 and +3 read/write: data at the latched address. See [Ethernet](#ethernet). |
 
 `ext_a[3]` is spare.
 
@@ -237,7 +246,7 @@ that saves a part. With seven selects needed the trade goes the other way.
 | Z85C80 SCSI | `/RESET`, active low | from `RES#` through the HCT buffer |
 | 82077AA | `RESET`, active high | `RES#` through a 74HCT04 gate |
 | Z85C80 SCC | none | `/RD` and `/WR` asserted together |
-| W5100S | `/RESET`, active low | from `RES#` |
+| ENC424J600 | none: power-on reset, and a software reset through ECON2 | — |
 
 **Built:** while `RES#` is asserted, the bridge also pulls `RD#` and `WR#`
 low together. CPU accesses to the window meanwhile end at once and read
@@ -313,23 +322,27 @@ emulated SCC share the 65C816's single `IRQ`, through the interrupt status
 and mask registers at `$0440` and `$0441` (below). Bit 0 of `$0340` still
 reads the card line.
 
-**Proposed:** keep one pin for the cards by wire-ORing their interrupts on the
-carrier.
+**Drawn:** one pin for the cards, their interrupts wire-ORed on the carrier,
+each through a jumper that can take it off the line.
 
 | Source | Polarity | Into the node |
 |---|---|---|
 | Z85C80 SCC `/INT` | open-drain, active low | directly |
 | Z85C80 SCSI `IRQ` | active high | through a 74HC05 open-drain inverter |
 | 82077AA `INT` | active high | through a 74HC05 open-drain inverter, with a pull-down at its input |
-| W5100S `/INT` | active low, push-pull (**Check**) | through a BAT54 Schottky (anode on the node), or a 74LVC1G07 |
+| ENC424J600 `/INT` | active low, push-pull; the pin doubles as the `SPISEL` strap, pulled down 100k | through a 74LVC1G07 open-drain buffer |
+| the slot's `/IRQ` | open collector from the card | through an SS14 Schottky, anode on the node |
 
 * The node has its own pull-up to 3.3V, so it goes straight to the existing
   pin 19 (`ext_irq_n`) with no level shifter.
 * The 74HC05 runs at 5V, but its open-drain outputs only ever pull down.
 * The 82077AA tristates `INT`, as it does `DRQ`, while its DMA gate is off in
   AT mode. The pull-down keeps the 74HC05 input from floating.
-* An inverting '05 gate can't take the W5100S's active-low push-pull output,
-  hence the diode or the non-inverting open-drain buffer.
+* An inverting '05 gate can't take the ENC424J600's active-low push-pull
+  output, hence the non-inverting open-drain buffer. A diode would not do
+  either: with the node pulled up to 3.3V it would forward-bias into the
+  100k pull-down on `INT/SPISEL` and the chip would latch SPI mode at
+  power-up.
 * There is no priority encoder. A 74HC148 would need three more input pins,
   and none are free. Software reads each chip, as below.
 
@@ -337,10 +350,11 @@ Software finds the source by reading each chip:
 * **SCC:** RR3 on channel A.
 * **53C80:** Bus and Status register, bit 4.
 * **82077AA:** the main status register, or Sense Interrupt Status for a seek.
-* **W5100S:** its interrupt register.
+* **ENC424J600:** EIR.
 
-**82077AA in PC/AT mode:** `INT` and `DRQ` stay disabled until bit 3 of DOR
-(the DMA gate) is set. **Check.**
+**82077AA in PC/AT mode:** `INT` and `DRQ` are tristated until bit 3 of DOR
+(the DMA gate) is set; confirmed in the Intel datasheet's DOR description.
+The carrier pulls both down.
 
 **Built:** an interrupt status register at `$0440` with one bit for each
 source the FPGA can tell apart, and a mask at `$0441` (`$FF` at reset):
@@ -369,8 +383,8 @@ timer is on `IRQ`, not `NMI`, so a tick can't interrupt an IRQ handler.
 | FPGA, 27 MHz | onboard crystal | Built: one PLL to the 45 MHz system clock, another to the 25.2 MHz pixel clock |
 | Z85C80 `PCLK` | oscillator on the carrier | 8 MHz maximum for the parts on hand |
 | Z85C80 `/RTxCA`, `/RTxCB` | the same oscillator | Supplies the baud-rate generators |
-| 82077AA | 24 MHz crystal or oscillator (**Check**) | |
-| W5100S | 25 MHz crystal (**Check**) | |
+| 82077AA | 24 MHz parallel-resonant fundamental crystal, or a MOS-level clock on X1 with X2 open (Intel datasheet) | Drawn: a crystal with 22 pF |
+| ENC424J600 | 25 MHz parallel-resonant crystal, ±50 ppm total, or a 3.3V clock on OSC1 (DS39935C, section 2.1) | Drawn: a crystal with 22 pF; **Check** the load capacitance against the crystal chosen |
 
 **Decided:** one 7.3728 MHz oscillator drives `PCLK` and both `/RTxC` pins.
 It is under the 8 MHz limit, and it divides exactly to the standard baud
@@ -380,7 +394,8 @@ rates: 115200 is a time constant of 0 at x16.
 3.6864 MHz on `/RTxC`, and 7.3728 MHz can't give it: directly it is twice
 that, and through the baud-rate generator (at most a quarter) it is half.
 Networking will be Ethernet (see [Ethernet](#ethernet)), so the IIgs
-crystal is not needed.
+crystal is not needed. The connectors and drivers drawn are LocalTalk-capable;
+only the clock is not.
 
 With an oscillator on `/RTxCA` there is no crystal, so WR11 bit 7 (RTxC
 Xtal/No Xtal) stays 0, as OS16's serial driver writes it. `/SYNCA` is then an
@@ -394,35 +409,73 @@ and it needs no FPGA pins of its own: it is on the shared bus, with a select
 code and the wired-OR interrupt. Its uses are small: a serial console that
 does not depend on the BL616, slow data transfer (115200 baud is about
 11 KB/s; Ethernet does this better), and perhaps a vintage serial printer.
-So its parts are **optional on the PCB**, apart from the oscillator, which
-the chip needs to run at all.
+The oscillator is the one part the chip needs to run at all: a 7.3728 MHz
+DIP-8 can (Drawn).
 
+**Drawn:** both channels on Mac-pinout Mini-DIN-8s at RS-422/423 levels, so
+every Macintosh modem, printer and RS-232 adapter cable fits. Channel A is
+the modem port, channel B the printer port.
+
+| Pin | Mac name | Wired to |
+|---|---|---|
+| 1 | `HSKo` | a 26C31 driver's inverting output, fed by `/RTS`: RTS asserted puts the positive level on the line |
+| 2 | `HSKi` | a 26C32 receiver against ground, inverted by a 74HC05 gate into `/CTS` (the shared `/TRxC` pin, so it can also be an external clock) |
+| 3 | `TxD-` | the inverting output of the TxD driver pair |
+| 4 | ground | |
+| 5 | `RxD-` | the receiver's B input |
+| 6 | `TxD+` | the non-inverting output of the TxD driver pair |
+| 7 | `GPi` | a receiver against ground, inverted by a 74HC05 gate into `/DCD` |
+| 8 | `RxD+` | the receiver's A input |
+
+* One 26C31 drives both ports; each port has a 26C32, with one receiver
+  spare.
+* With A on `RxD+` and B on `RxD-`, an RS-232 adapter cable (which grounds
+  `RxD+` and puts the device's TxD on `RxD-`) reads mark when idle.
+* 10k bias on every input: `RxD+`, `HSKi` and `GPi` up, `RxD-` down, so an
+  unplugged port reads idle with CTS and DCD asserted. The 10k pull-ups on
+  `/CTS` and `/DCD` are the '05 gates' loads.
+* `/DTR//REQ` and `/W//REQ` are not connected.
 * **Console:** the BL616 USB bridge, through the FPGA's emulation of channel
   A, at 115200 8N1. The real channel A is the console when a real serial
   port is wanted.
-* **SCC channel A, external:** RS-232 through a MAX3232, to a connector.
-  Both are optional. RS-422 (26LS31 and 26LS32, as on the Macintosh) is not
-  needed without AppleTalk.
-* **SCC channel B, internal:** an optional header at TTL level.
-* **Unfitted drivers:** pull up `RxDA`, `/CTSA` and `/DCDA` (10k), so that
-  the inputs don't float when the MAX3232 is left off. Channel B's inputs
-  get the same pull-ups at the header.
 
 ## SCSI
 
 * The 53C80 drives the bus directly. Its open-drain outputs sink 48 mA, so
   there are no external drivers.
-* The carrier is one end of the bus, so it needs terminators. TERMPWR comes
-  from +5V through a diode and a fuse.
-* There are two connectors on the one bus: an internal 50-pin IDC header and
-  an external connector. **Open:** the external connector type, DB-25 as on
-  the Macintosh or Centronics-50.
+* **Drawn:** two connectors on the one bus, an internal 50-pin IDC header in
+  the SCSI-1 ribbon pinout (odd pins ground) and an external DB-25 in the
+  Apple pinout. **Check** the DB-25 table on the schematic against an Apple
+  SCSI cable before fabrication.
+* With two connectors the carrier is an end of the bus only while one of
+  them is in use, so its terminators are four socketed 220/330 SIP packs:
+  fitted then, pulled when both internal and external devices are attached
+  and the far devices terminate.
+* TERMPWR comes from +5V through a 1.1 A polyfuse and a Schottky to both
+  connectors and the packs, with 10 µF on it.
 
 ## Floppy
 
-* The 82077AA drives a 34-pin drive cable for two drives.
-* **Check:** whether its drive interface outputs can drive the cable directly.
-* 3.5" drives need +5V only.
+**Drawn**, from the Intel datasheet's PC/AT design (section 9):
+
+* One 34-pin header in the PC pinout, odd pins ground, for a twisted PC
+  cable: the drive beyond the twist is drive 0 (`DS0`, `ME0`), the one
+  before it drive 1 (`DS1`, `ME1`).
+* PC/AT mode: `IDENT` high with `MFM` open (it has an internal pull-up),
+  `INVERT` low so the chip's 40 mA outputs and its receivers serve the cable
+  directly (confirmed: no external drivers), `PLL0` high (floppy, not tape),
+  `DRV2` pulled up, `TC` active high, `/DACK` from decoder output 1.
+* 1k pull-ups on the five drive inputs, the datasheet's value for 3.5"
+  drives (150R suits 5.25" open-collector drives).
+* A 24 MHz crystal with 22 pF, and 4.7 nF between `HIFIL` and `LOFIL`.
+* 2.88 MB: the chip's 1 Mbps rate needs nothing more. `DENSEL` reaches the
+  header through a three-pin jumper, either as the chip drives it (high for
+  500k/1M, the 5.25" sense) or inverted through a spare 74HCT04 gate (the
+  3.5" sense). `DRATE0/1` can reach the header's spare pins 4 and 6 through
+  solder jumpers, for ED drives that want a rate signal; most sense the
+  media.
+* Two 4-pin drive power headers (+5V, two grounds, +12V unused) with 10 µF
+  bulk. 3.5" drives need +5V only.
 
 ## Sound
 
@@ -466,19 +519,73 @@ therefore share them, with **no new pins**:
 
 ## Ethernet
 
-**Open; proposed:** a WIZnet W5100S on the external bus, select 5.
+**Drawn:** a Microchip ENC424J600 (10/100 MAC and PHY with a 24 KB packet
+buffer, 44-pin TQFP) on the external bus, select 5. It replaces the W5100S
+proposed earlier. Source: DS39935C.
 
-* The W5100S has a parallel "indirect bus" interface of four registers,
-  which fits a 16-byte slot. It needs no FPGA pins: it uses the data bus, two
-  address lines, `RD#`, `WR#`, a select and the shared interrupt.
-* It does TCP/IP itself (four sockets), so the 65C816 only moves data.
-* It runs from 3.3V with 5V-tolerant inputs, so it can sit on either side of
-  the level shifters. **Check.**
-* It needs a magnetics jack (RJ45 with transformer) and a 25 MHz crystal.
+* **Parallel mode 5.** The 44-pin part offers only its parallel modes 5 and
+  6, both 8-bit with the address multiplexed onto the data pins and latched
+  inside the chip by an `AL` strobe. The SFR space needs nine address bits,
+  `AD<8:0>`, and the buffer is reached through the auto-incrementing
+  `EGPDATA`, `ERXDATA` and `EUDADATA` windows in that space, so `AD<14:9>`
+  are tied high and a 16-byte slot is enough: it needs no FPGA pins, like
+  the W5100S it replaces.
+* **Register map** in slot 5: `$0850` write = the address low byte with
+  `AD8` = 0 (SFRs from 7E00h); `$0852` write = the address low byte with
+  `AD8` = 1 (from 7F00h); `$0851` and `$0853` read or write = data at the
+  latched address. `AD8` is simply `ext_a[1]` during the address write; the
+  latch keeps the address until the next `AL`, so back-to-back data accesses
+  need no new address cycle.
+* **Glue.** The chip's `RD`, `WR`, `AL` and `CS` are active high, so a
+  74HCT02 makes `RD = NOR(RD#, A0#)`, `WR = NOR(WR#, A0#)`,
+  `AL = NOR(WR#, A0)` and `CS = NOT(ETH_CS#)`, with `A0#` from a spare
+  74HCT04 gate. `PSPCFG0` low selects mode 5; `INT/SPISEL` pulled down 100k
+  selects the parallel port at power-up.
+* **Levels.** It runs from the 3.3V rail; its parallel-port pins are 5V
+  tolerant inputs and the data pins drive 3.3V on reads (section 5.1), so it
+  sits on the 5V side of the bus with no shifting of its own.
+* **Interrupt:** `/INT` is push-pull and shares the `SPISEL` strap, so it
+  goes to the node through a 74LVC1G07 open-drain buffer and a jumper
+  ([Interrupts](#interrupts)).
+* **Parts:** a 25 MHz crystal with 22 pF, 12.4k 1% on `RBIAS`, 10 µF low-ESR
+  on `VCAP`, 100 nF on each of the five supply pairs and 1 nF across the PLL
+  and TX pairs, and the magnetics of the datasheet's Figure 2-5: 49.9R 1%
+  from each `TPOUT` and `TPIN` to its common node, 10R to 3.3V on the TX
+  centre tap, 6.8 nF in series with each `TPIN`, 10 nF on both common nodes,
+  into a HanRun HR911105A jack with the transformers, the 75R common-mode
+  network and two LEDs inside. **Check** the jack's LED pin polarity.
+* **Software:** unlike the W5100S it has no TCP/IP of its own; the 65C816
+  runs the stack. em16 does not emulate it.
 
-The alternative is a W5500 or ENC28J60 on SPI. There are no pins left for
-one: the microSD slot's four (81-84) are the SD card's. The W5100S on the
-bus needs none.
+The alternative was its SPI port, on the microSD slot's SPI lines with a
+spare pin as chip select. It was rejected: the slot's four pins (81-84) are
+not on the edge headers, and the only spare pins are the DDC level-shifter
+side (52, 53), CEC (25) and the LED (20), three of which share wires with
+the monitor.
+
+## Slot
+
+**Drawn:** one 50-pin slot in the Apple II form, kept for test points and for
+cards built for this bus; it costs little. It carries the Intel bus on the 5V
+side:
+
+| Slot pin | Signal |
+|---|---|
+| 42-49 | `D7`-`D0`, the Apple order |
+| 2-5 | `A0`-`A3` |
+| 41 `/DEVSEL` | decoder select 6, `$0860` |
+| 1 `/IOSEL` | decoder select 7, `$0870` |
+| 18 `R/W` | `WR#`: high for reads and idle, low during a write. True 6502 timing would need `R/W` held either side of a clock, which the two strobes cannot give without a latch and a delayed `PHI0`; at this bus speed no 6500-family part would keep up anyway |
+| 35, 36 | the raw `RD#` and `WR#`, on the `COLORREF` and `7M` positions, which no I/O card uses |
+| 31 `/RES` | `RES#` |
+| 30 `/IRQ` | into the interrupt node through an SS14, anode on the node: a card may only pull it down |
+| 27, 28 `DMA IN`, `INT IN` | pulled up 3k3, as a lone slot has no neighbour |
+| 25, 26, 33, 50 | +5V, ground, -12V, +12V |
+
+`PHI0`, `RDY`, `/NMI`, `/DMA`, `/INH`, `-5V` and the clocks are not
+connected. A 68881 on a card would need its `DSACK` handshake honoured, which
+means a wait input into the bridge; `RDY` is wired to nothing because no FPGA
+pin is spare for it, and one of the DDC pins is the only candidate.
 
 ## SD card
 
@@ -521,10 +628,12 @@ milliseconds between transactions, and the controller enforces this (see
   * FPGA high means bus low.
   * The pin has a pull-down, so the bus stays released while the FPGA is
     unconfigured.
-* **`adb_sense`, pin 28:** a level shifter from the 5V bus: a 74LVC1G17,
-  whose Schmitt input suits the slow edges, or the spare 74LVC125A gate. The
-  pin has no pull-up, because one would fight the bus pull-up.
-* **Bus pull-up R3:** to +5V. A few kilohms is typical; **Check** the value.
+* **`adb_sense`, pin 28:** drawn as a 10k/15k divider from the bus, 3.0V at
+  a 5V high, with a BAT54S clamp to 3.3V. A 74LVC1G17, whose Schmitt input
+  suits the slow edges, is the alternative. The pin has no pull-up, because
+  one would fight the bus pull-up.
+* **Bus pull-up:** 470R to +5V (drawn), as Apple's host has it; the
+  breadboard ran with 1k.
 * **Connector:** 4-pin mini-DIN.
   * Pin 1 is data.
   * Pin 2 is power-on, the keyboard power key.
@@ -535,17 +644,30 @@ milliseconds between transactions, and the controller enforces this (see
 
 ## Power
 
-**Open.** The carrier needs a 5V supply of its own, for:
-* the Z85C80 and 82077AA
-* SCSI TERMPWR
-* the ADB bus, and the device's +5V
-* the floppy drives, about 1A each while their motors spin up
+**Drawn:** a 24-pin ATX header, for a picoPSU off a 12V brick or any SFX or
+ATX supply. The supply provides every rail, so the carrier has no regulator:
 
-It also needs 3.3V for the level shifters and the W5100S. That can come from
-a regulator on the carrier rather than from the Tang Nano.
+| Rail | For |
+|---|---|
+| +5V | the Z85C80, 82077AA and logic, the serial drivers, ADB, SCSI TERMPWR, the floppy drives, and the Tang Nano |
+| +3.3V | the level shifters, the ENC424J600 and the FPGA-side pull-ups |
+| +12V | a disk-drive power connector and the slot |
+| -12V | the slot |
 
-Plan on at least 2A at 5V. The Tang Nano can take 5V from the carrier or keep
-its USB-C power; the two supplies need a common ground.
+The budget at 5V is about 2A typical and 3 to 4A with two floppies spinning
+up (the Tang Nano 0.3 to 0.5A, chips and logic 0.3A, ADB up to 0.5A,
+TERMPWR up to 0.9A, two drives 1.5A at spin-up); 12V is drawn only by a
+vintage SCSI disk. `PS_ON#` goes to a two-pin header: a shunt for always-on,
+or a switch.
+
+**The Tang Nano's 5V pin is USB VBUS itself.** Measured on the board with
+only USB connected: 5.18V, with no diode on the Tang Nano. The carrier
+therefore feeds that pin through a Schottky and a jumper: with USB plugged in
+the host's higher voltage powers the Tang Nano and the diode stays off, so
+nothing flows back into the carrier rail; with USB unplugged the carrier
+feeds it at about 4.7V, which its 3.3V buck regulator (MT3520B) is happy
+with. Pulling the jumper leaves the Tang Nano on USB alone during bring-up.
+The Tang Nano's own 3.3V output is not used.
 
 ## Emulation
 
@@ -647,7 +769,7 @@ well as the UART.
 
 | Pin | Status |
 |---|---|
-| 52, 53 | Spare, with care: HDMI DDC, with 2.2k pull-ups, and the monitor is on the lines. |
+| 52, 53 | Spare, with care: the 3.3V side of 2N7002 level shifters to the monitor's 5V DDC lines, with 2.2k pull-ups to 3.3V (Sipeed schematic rev 3923). An output here drives the monitor's DDC too. |
 | 32 | Spare, with difficulty: LCD connector only. It needs an FPC breakout, and FPC pins 1-2 carry the backlight boost output. |
 | 26 | Not usable: HDMI hot-plug detect, 2.2k to the connector and 5.1k to ground. It reads low without a monitor asserting hot-plug, which was the cause of the spurious ADB SRQ. It is usable only as that input. |
 | 13 | Not usable: BL616 SPI clock. |
@@ -692,8 +814,9 @@ dimension drawing, revision 3921).
   the Tang Nano and are not on the headers.
 * The pin assignments are from the schematic (revision 3923). The
   orientation is from two published carrier boards' footprints (WonderTANG,
-  VDAC4), not from Sipeed. **Check** on the board that the pin by the USB-C
-  end of the right-hand row is +5V before the carrier goes to fabrication.
+  VDAC4), not from Sipeed. Confirmed on the board (November 2026): the pin
+  by the USB-C end of the right-hand row reads 5.18V with only USB
+  connected, so it is +5V, and USB VBUS itself ([Power](#power)).
 * WonderTANG's symbol has pin 78 at J5-3, where the schematic has 76.
   **Check** J5-3 against pin 76 on the board.
 * KiCad: the symbol `Tang_Nano_20K` in 65Parts numbers J5 as 1-20 and J6 as
@@ -702,127 +825,148 @@ dimension drawing, revision 3921).
 ## PCB requirements
 
 Everything the carrier board has to provide, in one list. Each line refers
-to the section that explains it.
+to the section that explains it. Ticked items are in the 65-16 schematic;
+the rest are layout.
 
 ### Connection to the Tang Nano
 
 - [ ] Sockets for the Tang Nano 20K's two edge headers. Every FPGA signal in
       [Pins](#pins) except the microSD slot comes through them.
-- [ ] A common ground with the Tang Nano, and a decision on whether the
-      carrier powers it ([Power](#power)).
+- [x] A common ground with the Tang Nano, which the carrier powers through
+      a jumper and a Schottky ([Power](#power)).
 - [ ] Clearance for the HDMI, USB-C and speaker connectors and the microSD
       slot.
 
 ### Power
 
-- [ ] A 5V supply of at least 2A, for the chips, SCSI TERMPWR, ADB and two
-      floppy drives.
-- [ ] 3.3V for the level shifters and the W5100S, from a regulator on the
-      carrier.
-- [ ] Decoupling on every chip, and bulk capacitance by the floppy power
-      connector.
-- [ ] A fuse and diode on SCSI TERMPWR.
+- [x] A 24-pin ATX header: +5V (2A typical, 4A peak), +3.3V, +12V and -12V
+      from a picoPSU or any SFX/ATX supply; `PS_ON#` on a two-pin header.
+- [x] 3.3V for the level shifters and the ENC424J600 from the supply; no
+      regulator on the carrier.
+- [x] Decoupling on every chip, bulk capacitance at the ATX header and by
+      the floppy power connectors, and a Molex drive power connector with
+      +12V and +5V.
+- [x] A polyfuse and a Schottky on SCSI TERMPWR.
 
 ### Level shifting and bus buffering
 
-- [ ] A 74LVC245A at 3.3V on `ext_d[7:0]`. `DIR` comes from `RD#` and `/OE`
+- [x] A 74LVC245A at 3.3V on `ext_d[7:0]`. `DIR` comes from `RD#` and `/OE`
       from the select enable, both on the FPGA side.
-- [ ] A 74HCT541 (or 74AHCT541) at 5V on the FPGA outputs: `ext_a[3:0]`,
-      `RD#`, `WR#`, `RES#` and `TC`.
-- [ ] A 74LVC125A at 3.3V on the inputs to the FPGA: `DRQ0`, `DRQ1`, and
-      `adb_sense` if it doesn't get a 74LVC1G17.
-- [ ] A 74HCT04 for the two inverters: `TC` to the 53C80 `/EOP`, and `RES#`
-      to the 82077AA `RESET`.
-- [ ] On the FPGA side of the buffers: pull-ups to 3.3V on `RD#`, `WR#` and
+- [x] A 74HCT541 at 5V on the FPGA outputs: `ext_a[3:0]`, `RD#`, `WR#`,
+      `RES#` and `TC`.
+- [x] A 74LVC125A at 3.3V on the inputs to the FPGA: `DRQ0` and `DRQ1`.
+- [x] A 74HCT04: `TC` to the 53C80 `/EOP`, `RES#` to the 82077AA `RESET`,
+      `DENSEL` for 3.5" drives, and `A0#` for the ENC424J600 glue.
+- [x] On the FPGA side of the buffers: pull-ups to 3.3V on `RD#`, `WR#` and
       the select enable, and pull-downs on `RES#` and `TC`
       ([Voltage levels](#voltage-levels)).
-- [ ] No 5V signal reaches an FPGA pin anywhere, and no FPGA-side net is
+- [x] No 5V signal reaches an FPGA pin anywhere, and no FPGA-side net is
       pulled to 5V.
 
 ### Select decoding
 
-- [ ] A 74HCT138: the select code on A-C, the select enable on `/G2A`, and
-      `G1` tied high ([Select decoding](#select-decoding-proposed-change)).
-- [ ] The select enable's pull-up to 3.3V (above) keeps the decoder off
+- [x] A 74HCT138: the select code on A-C, the select enable on `/G2A`, and
+      `G1` tied high ([Select decoding](#select-decoding)).
+- [x] The select enable's pull-up to 3.3V (above) keeps the decoder off
       while the FPGA is unconfigured.
 
 ### Interrupts and DMA
 
-- [ ] A 74HC05 for the interrupt wire-OR: open-drain inverters for the
-      SCSI `IRQ` and the floppy `INT` ([Interrupts](#interrupts)).
-- [ ] A pull-down on the 82077AA `INT`, at the 74HC05 input.
-- [ ] A BAT54 Schottky or a 74LVC1G07 for the W5100S `/INT`.
-- [ ] A pull-up to 3.3V on the interrupt node, which goes to pin 19.
-- [ ] `DRQ0` (53C80) and `DRQ1` (82077AA) to pins 79 and 80, through the
+- [x] A 74HC05 for the interrupt wire-OR: open-drain inverters for the
+      SCSI `IRQ` and the floppy `INT` ([Interrupts](#interrupts)); its other
+      four gates invert the serial handshake inputs.
+- [x] A pull-down on the 82077AA `INT`, at the 74HC05 input.
+- [x] A 74LVC1G07 for the ENC424J600 `/INT`, and an SS14 for the slot's
+      `/IRQ`.
+- [x] A 4k7 pull-up to 3.3V on the interrupt node, which goes to pin 19.
+- [x] `DRQ0` (53C80) and `DRQ1` (82077AA) to pins 79 and 80, through the
       LVC buffer.
-- [ ] Pull-downs on both `DRQ` inputs to the buffer, on the 5V side: the
+- [x] Pull-downs on both `DRQ` inputs to the buffer, on the 5V side: the
       82077AA tristates `DRQ` while its DMA gate is off ([DMA.md](DMA.md)).
-- [ ] `TC` from pin 85 to the 82077AA `TC`, and through the 74HCT04 to the
+- [x] `TC` from pin 85 to the 82077AA `TC`, and through the 74HCT04 to the
       53C80 `/EOP`.
-- [ ] Decoder outputs 1 and 4 to the 82077AA and 53C80 `/DACK`.
+- [x] Decoder outputs 1 and 4 to the 82077AA and 53C80 `/DACK`.
 
 ### Z85C80
 
-- [ ] A 68-pin PLCC socket.
-- [ ] A 7.3728 MHz oscillator to `PCLK`, `/RTxCA` and `/RTxCB`.
-- [ ] `/INTACK` pulled up.
-- [ ] `/SYNCA` pulled up (10k); no crystal on `/RTxCA` and `/SYNCA`.
-- [ ] Pull-ups on `/W//REQA` and `/W//REQB`, or leave them unconnected.
-- [ ] `/RESET` (SCSI) from `RES#`.
-- [ ] `D//C` to `ext_a[0]`, `A//B` to `ext_a[1]`, SCSI A2-A0 to
+- [x] A 68-pin PLCC socket.
+- [x] A 7.3728 MHz oscillator (DIP-8 can) to `PCLK`, `/RTxCA` and `/RTxCB`.
+- [x] `/INTACK` pulled up.
+- [x] `/SYNCA` pulled up (10k); no crystal on `/RTxCA` and `/SYNCA`.
+- [x] `/W//REQA`, `/W//REQB`, `/DTR//REQA` and `/DTR//REQB` unconnected.
+- [x] `/RESET` (SCSI) from `RES#`.
+- [x] `D//C` to `ext_a[0]`, `A//B` to `ext_a[1]`, SCSI A2-A0 to
       `ext_a[2:0]`.
-- [ ] Channel A: a MAX3232 and an RS-232 connector, both optional.
-- [ ] Channel B: an optional internal header at TTL level.
-- [ ] 10k pull-ups on `RxDA`, `/CTSA`, `/DCDA`, `RxDB`, `/CTSB` and `/DCDB`,
-      for when the drivers or the header are left off.
-- [ ] The modem lines (`/CTS`, `/DCD`, `/RTS`, `/DTR`) to the connectors, or
-      tied inactive.
+- [x] Both channels on Mac Mini-DIN-8s through a 26C31 and two 26C32s:
+      `HSKo` from `/RTS`, `HSKi` and `GPi` inverted into `/CTS` and `/DCD`
+      by 74HC05 gates with 10k pull-ups, 10k bias so an empty port reads
+      idle ([Serial](#serial)).
 
 ### SCSI
 
-- [ ] An internal 50-pin IDC header and an external connector (**Open**:
-      DB-25 or Centronics-50), on the same bus.
-- [ ] Termination at the carrier end, active or 220/330 passive.
-- [ ] TERMPWR from +5V through a diode and a fuse.
-- [ ] The 53C80's bus pins wired straight to the connectors. Its outputs
+- [x] An internal 50-pin IDC header and an external DB-25 (Apple pinout),
+      on the same bus.
+- [x] Termination: four socketed 220/330 SIP packs, fitted only while the
+      carrier is a bus end.
+- [x] TERMPWR from +5V through a polyfuse and a Schottky.
+- [x] The 53C80's bus pins wired straight to the connectors. Its outputs
       drive the bus directly.
 
 ### Floppy
 
-- [ ] An 82077AA, in a 68-pin PLCC socket.
-- [ ] A 24 MHz fundamental-mode parallel-resonant crystal, or a MOS-level
-      clock on X1 with X2 left open.
-- [ ] `RESET` (active high) from `RES#` through the 74HCT04.
-- [ ] A2-A0 to `ext_a[2:0]`.
-- [ ] A 34-pin drive header for two drives, and drive power connectors.
-- [ ] `INVERT` tied to ground, so the 82077AA's own drivers and receivers
-      serve the cable directly; pull-ups (typically 1k) on the drive's
-      open-collector outputs.
+- [x] An 82077AA, in a 68-pin PLCC socket.
+- [x] A 24 MHz fundamental-mode parallel-resonant crystal with 22 pF, and
+      4.7 nF between `HIFIL` and `LOFIL`.
+- [x] `RESET` (active high) from `RES#` through the 74HCT04.
+- [x] A2-A0 to `ext_a[2:0]`.
+- [x] A 34-pin drive header for two drives on a twisted cable, and two
+      drive power headers.
+- [x] `INVERT` tied to ground, so the 82077AA's own drivers and receivers
+      serve the cable directly; 1k pull-ups on the five drive inputs.
+- [x] `IDENT` high, `MFM` open, `PLL0` high, `DRV2` pulled up; the `DENSEL`
+      polarity jumper and the `DRATE0/1` solder jumpers for 2.88 MB drives.
 
 ### Ethernet
 
-- [ ] A W5100S, in indirect bus mode, on select 5. A1-A0 to `ext_a[1:0]`.
-- [ ] A 25 MHz crystal (**Check**).
-- [ ] An RJ45 jack with integrated magnetics.
-- [ ] `/RESET` from `RES#`, and `/INT` into the interrupt node.
+- [x] An ENC424J600 in parallel mode 5 on select 5: data on `AD<7:0>`,
+      `ext_a[1]` on `AD8`, `AD<14:9>` pulled high ([Ethernet](#ethernet)).
+- [x] A 74HCT02 making the active-high `RD`, `WR`, `AL` and `CS`.
+- [x] `PSPCFG0` low; `INT/SPISEL` pulled down 100k.
+- [x] A 25 MHz crystal with 22 pF (**Check** the load capacitance), 12.4k
+      on `RBIAS`, 10 µF on `VCAP`.
+- [x] The Figure 2-5 magnetics network into a HanRun HR911105A jack
+      (**Check** its LED pin polarity).
+- [x] `/INT` into the interrupt node through the 74LVC1G07 and a jumper.
 
 ### ADB
 
-- [ ] A transistor from pin 27 that pulls the ADB line low when the pin is
+- [x] A transistor from pin 27 that pulls the ADB line low when the pin is
       high ([ADB](#adb)).
-- [ ] A 74LVC1G17, or the spare 74LVC125A gate, from the ADB line to pin 28.
-- [ ] The bus pull-up, R3, to +5V (**Check** the value).
-- [ ] A 4-pin mini-DIN: data, power key, +5V, ground.
+- [x] A 10k/15k divider with a BAT54S clamp from the ADB line to pin 28.
+- [x] The bus pull-up, 470R to +5V.
+- [x] A 4-pin mini-DIN: data, power key, +5V, ground.
 - [ ] The power key line brought to somewhere it can be read, if keyboard
       power-on is wanted (**Open**).
 
+### Slot
+
+- [x] A 50-pin slot in the Apple II form carrying the 5V-side bus
+      ([Slot](#slot)): `D0`-`D7`, `A0`-`A3`, `/DEVSEL` and `/IOSEL` from
+      selects 6 and 7, `R/W` from `WR#`, the raw strobes on pins 35 and 36,
+      `/RES`, `/IRQ` through an SS14, `INT IN` and `DMA IN` pulled up, +5V,
+      +12V and -12V.
+
 ### Test and bring-up
 
-- [ ] A header carrying the external bus signals for a logic analyser:
-      data, address, the select code and enable, `RD#`, `WR#`, `IRQ#`, `DRQ`
-      and `TC`.
-- [ ] Test points on 5V, 3.3V and ground.
-- [ ] Jumpers or 0R links to isolate each chip's interrupt and DMA lines.
+- [x] A 40-pin logic analyser header: pins 2-9 `D0`-`D7`, 11-14 `A0`-`A3`,
+      15-18 `RD#`, `WR#`, `RES#`, `TC`, 20-25 the six decoded selects, 26-27
+      the two DRQs, 29-30 `SCSI_IRQ` and `FDC_INT`, 31 the `IRQ#` node,
+      32-35 the select code and enable, 36-37 the FPGA-side `RD#` and `WR#`,
+      38 `EOP#`; grounds on 1, 10, 19, 28, 39 and 40. Nothing in series.
+- [x] Loop test points on 5V, 3.3V and ground.
+- [x] Jumpers isolating each chip's interrupt and DMA line: the SCC's
+      `/INT`, the two 74HC05 outputs, the ENC424J600's buffered `/INT`, and
+      both DRQs, with the DRQ pull-downs on the FPGA side of the jumper.
 
 ### Stereo audio (optional)
 
@@ -840,13 +984,13 @@ to the section that explains it.
 
 1. Run a continuity check on the board for pins 25, 26, 31, 49, 71-76, 79, 80,
    85 and 86, and turn **Sch** into **Board** in the tables.
-2. Confirm the **Check** items against the datasheets:
+2. Confirm the **Check** items:
    * the Z85C80 8 MHz grade's bus timing
-   * the 82077AA's DOR bit 3 gating and its bus timing
-   * the W5100S's bus timing, its `/INT` output, its 5V tolerance and its
-     crystal
-3. Decide the **Open** items: the external SCSI connector, power, SCC DMA, and
-   whether to build the Ethernet as proposed.
+   * the 82077AA's bus timing (its DOR gating is confirmed)
+   * the ENC424J600 crystal's load capacitance, and the HR911105A's LED
+     pin polarity
+   * the DB-25 SCSI pinout against an Apple cable
+3. Decide the **Open** items: SCC DMA, and keyboard power-on.
 4. RTL changes:
    * ~~Intel-only `external_bus.v` at the 8 MHz timing, with the SCC
      recovery hold-off~~ (done)
@@ -855,3 +999,5 @@ to the section that explains it.
    * ~~the DMA engine and its multiplexer on the memory-master port~~ (done)
    * ~~the interrupt register~~ (done, with the tick timer)
    * ~~the `.cst` pin moves~~ (done)
+5. Lay out the 65-16 board from the schematic, and write the ENC424J600
+   driver (and an em16 model, if software wants it before the board).
