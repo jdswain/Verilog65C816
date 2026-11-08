@@ -1962,8 +1962,10 @@ iverilog -g2005 -o /tmp/sdsim rtl/sdram_ctrl.v sim/sdram_model.v sim/tb_sdram.v 
   suits it while data keeps the write-through path. But code written by stores
   still has to run: OS16 loads modules with ordinary stores and patches the
   banks of its MVN/MVP, relying on the queue rule to see them (see the core's
-  README). An I-cache would have to snoop CPU stores, or the rule change to an
-  explicit invalidate that OS16 then uses.
+  README). The rule kept (Nov 2026) is that a taken jump, call, return or
+  interrupt between writing code and running it is enough, so an I-cache would
+  have to snoop CPU stores or flush on a jump; the 8-byte distance is not
+  promised.
 * **Faster SDRAM clock.** Would not help the critical path -- the SDRAM
   controller is not on it -- but would cut miss cost (~18 cycles, mostly burst)
   and roughly quadruple video bandwidth headroom. Needs a clock-domain crossing.

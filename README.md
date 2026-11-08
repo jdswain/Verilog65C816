@@ -96,6 +96,16 @@ jump, call, return or interrupt comes between the store and the changed bytes
 (it empties the queue), or if every changed byte is at least 8 bytes past the
 end of the storing instruction. The SoC's cache is coherent with CPU stores.
 
+**The rule to rely on** (decided Nov 2026) is the first one: a taken branch,
+jump, call, return or interrupt between writing code and running it. Any
+later change to the core keeps it true: a deeper queue, or an I-cache, which
+would have to snoop stores or flush on that jump. The 8-byte distance is
+only how this queue behaves, not a promise. The same holds for code written
+by DMA or the blitter: the cache drops what they write, but nothing refreshes
+bytes already in the queue. MVN and MVP read their bank bytes once, at the
+start, and again only if an interrupt lands mid-move, so a move whose banks
+were just patched needs the jump too. OS16 relies only on the jump form.
+
 ## Cycle counts (rdy held high)
 
 | Instruction type | Cycles | Real W65C816 |

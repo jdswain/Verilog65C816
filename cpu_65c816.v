@@ -18,8 +18,9 @@
 // not use the bus. An instruction takes two cycles from its head, the opcode
 // and then all its operand bytes at once (S_OPS); a jump empties it. A store
 // to bytes already queued (at most the 8 after the current instruction) does
-// not change them: code written by stores needs a taken jump before it runs,
-// or must lie 8 bytes or more past the store.
+// not change them: code written by stores needs a taken jump before it runs
+// (the rule software relies on, kept across changes to the core), or, with
+// this queue only, must lie 8 bytes or more past the store.
 //
 // Bus protocol (simple synchronous SRAM-style):
 //   - When `vld` is high a bus cycle is in progress at `addr`.
