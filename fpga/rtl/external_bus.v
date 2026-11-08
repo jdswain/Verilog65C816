@@ -42,13 +42,16 @@
 // touch nothing: a cycle would end the SCC's reset.
 //
 // DMA. dma.v asks for cycles on a second port: a cycle to a /DACK slot,
-// with no address (ext_a is 0; the chips ignore it during /DACK), RD# to
+// with no address (dma_addr is 0; the chips ignore it during /DACK), RD# to
 // read from the device and WR# to write to it, and TC high from the start
 // of the cycle until the enable rises, 40 ns after the strobe, when it is
 // the transfer's last byte: the chips see TC with /DACK across the strobe's
-// rising edge.
+// rising edge. The ENC424J600's channel instead gives its data port's
+// address (slot 5, A3-A0 = 1) and never TC: an ordinary register cycle.
 // When both are waiting the DMA cycle goes first, so the CPU waits at most
-// one. The DMA port's data comes back in `rdata` too, flagged by `dma_ack`.
+// one: dma.v cannot ask again until a clock after this one sees the cycle
+// end, by which time a waiting CPU access has started. The DMA port's data
+// comes back in `rdata` too, flagged by `dma_ack`.
 //
 // The CPU is stalled through `ack` for the whole cycle.
 //============================================================================
@@ -72,7 +75,8 @@ module external_bus #(
     // DMA side (dma.v)
     input  wire        dma_req,          // held for the cycle
     input  wire        dma_we,           // 1 = WR#, memory to device
-    input  wire [2:0]  dma_slot,         // the /DACK slot
+    input  wire [2:0]  dma_slot,         // the /DACK slot, or 5 for the ENC424J600
+    input  wire [3:0]  dma_addr,         // A3-A0: 0 for a /DACK slot
     input  wire        dma_tc,           // assert TC during this cycle
     input  wire [7:0]  dma_wdata,
     output reg         dma_ack,          // one cycle; rdata holds a read
@@ -164,7 +168,7 @@ module external_bus #(
                     dma_ack <= dma_req;
                     state   <= S_GAP;
                 end else if (dma_req) begin
-                    ext_a     <= 4'd0;
+                    ext_a     <= dma_addr;
                     ext_sel   <= dma_slot;
                     ext_d_out <= dma_wdata;
                     ext_d_oe  <= dma_we;

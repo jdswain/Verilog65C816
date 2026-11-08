@@ -177,19 +177,20 @@ module soc #(
     wire [7:0]  ext_q;
     wire        ext_ack;
     wire        ext_irq;
-    wire [1:0]  dma_irq;
+    wire [2:0]  dma_irq;
     wire        tmr_irq;
     wire        pwr_irq;
 
     //------------------------------------------------------------------
     // Interrupt status and mask, $0440
     //
-    // The tick timer, the DMA engine's two channels, the external cards and
-    // the SCC share the 816's single IRQ line. $0440 shows which of them is
+    // The tick timer, the DMA engine's three channels, the external cards and
+    // the SCC and the power key share the 816's single IRQ line. $0440 shows which of them is
     // asking, so the handler reads one register before going to the chips:
     //   $0440 ISTAT (read)  0 timer, 1 DMA channel 0, 2 DMA channel 1,
     //                       3 cards, 4 SCC, 5 the power key (power.v, with
-    //                       its own enable); each is the source's own level
+    //                       its own enable), 6 DMA channel 2 (Ethernet);
+    //                       each is the source's own level
     //                       (cleared at the source), before the mask. Bit
     //                       4 is the emulated SCC; the real one will be on
     //                       the card line, bit 3
@@ -201,7 +202,7 @@ module soc #(
     // merge costs nothing and keeps the extra gates out of the CPU's own
     // logic.
     //------------------------------------------------------------------
-    wire [7:0] istat = {2'd0, pwr_irq, ~scc_int_n, ext_irq, dma_irq, tmr_irq};
+    wire [7:0] istat = {1'b0, dma_irq[2], pwr_irq, ~scc_int_n, ext_irq, dma_irq[1:0], tmr_irq};
     reg  [7:0] imask;
     reg irq_n;
     always @(posedge clk or negedge rst_n) begin
@@ -218,6 +219,7 @@ module soc #(
     // The DMA engine's cycles on the external bus (external_bus.v's DMA port)
     wire        dma_breq, dma_bwe, dma_btc, dma_back;
     wire [2:0]  dma_bslot;
+    wire [3:0]  dma_baddr;
     wire [7:0]  dma_bwdata;
     wire [7:0]  bridge_q;
     wire       sdram_ack;
@@ -487,10 +489,10 @@ module soc #(
         // DRQ is looked at again some 80 ns after a cycle.
         dma #(.DRQ_HOLD((SYS_HZ + 6_250_000) / 12_500_000)) u_dma (
             .clk(clk), .rst_n(rst_n),
-            .reg_addr(addr[4:0]), .wdata(wdata), .rdata(dma_q),
+            .reg_addr(addr[5:0]), .wdata(wdata), .rdata(dma_q),
             .cs(stb & sel_dma), .we(we), .irq(), .irq_ch(dma_irq),
             .drq(dma_drq),
-            .b_req(dma_breq), .b_we(dma_bwe), .b_slot(dma_bslot),
+            .b_req(dma_breq), .b_we(dma_bwe), .b_slot(dma_bslot), .b_addr(dma_baddr),
             .b_tc(dma_btc), .b_wdata(dma_bwdata),
             .b_rdata(bridge_q), .b_ack(dma_back),
             .m_req(dm_req), .m_we(dm_we), .m_addr(dm_addr),
@@ -567,10 +569,11 @@ module soc #(
         assign sdram_q32       = 32'hFFFF_FFFF;
         assign blt_q           = 8'hFF;
         assign dma_q           = 8'hFF;
-        assign dma_irq         = 2'd0;
+        assign dma_irq         = 3'd0;
         assign dma_breq        = 1'b0;
         assign dma_bwe         = 1'b0;
         assign dma_bslot       = 3'd0;
+        assign dma_baddr       = 4'd0;
         assign dma_btc         = 1'b0;
         assign dma_bwdata      = 8'd0;
         assign cache_hits      = 32'd0;
@@ -724,7 +727,7 @@ module soc #(
         .clk(clk), .rst_n(rst_n),
         .addr(addr[10:0]), .wdata(wdata), .rdata(bridge_q),
         .req(vld & sel_ext & ~scc_slot), .we(we), .ack(bridge_ack),
-        .dma_req(dma_breq), .dma_we(dma_bwe), .dma_slot(dma_bslot),
+        .dma_req(dma_breq), .dma_we(dma_bwe), .dma_slot(dma_bslot), .dma_addr(dma_baddr),
         .dma_tc(dma_btc), .dma_wdata(dma_bwdata), .dma_ack(dma_back),
         .card_reset(card_reset), .irq(ext_irq),
         .ext_a(ext_a), .ext_d_in(ext_d_in), .ext_d_out(ext_d_out),

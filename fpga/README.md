@@ -393,21 +393,29 @@ about, and sees every byte the blitter writes as soon as the blit is finished
 
 ### DMA -- `$0400`
 
-Two channels between SDRAM and the carrier's chips, one byte per external
+Three channels between SDRAM and the carrier's chips, one byte per external
 bus cycle: channel 0 for the 53C80 (SCSI, `DRQ0`, `/DACK` slot 4), channel 1
-for the 82077AA (floppy, `DRQ1`, slot 1). `rtl/dma.v`; `docs/DMA.md` is the
-specification.
+for the 82077AA (floppy, `DRQ1`, slot 1), channel 2 for the ENC424J600
+(Ethernet: no request line, its data port `$0851`, unpaced). `rtl/dma.v`;
+`docs/DMA.md` is the specification.
 
-| Offset | Channel 0 | Channel 1 | |
-|---|---|---|---|
-| +0..+2 | `$0400` | `$0410` | ADDR, the next byte's address (low first) |
-| +4..+6 | `$0404` | `$0414` | COUNT, the bytes left |
-| +8 | `$0408` | `$0418` | CTRL: 0 EN, 1 DIR (1 = memory to device), 2 TC on the last byte, 3 IE |
-| +9 | `$0409` | `$0419` | STATUS: 7 BUSY, 6 DRQ, 0 DONE (write 1 to clear) |
+| Offset | Channel 0 | Channel 1 | Channel 2 | |
+|---|---|---|---|---|
+| +0..+2 | `$0400` | `$0410` | `$0420` | ADDR, the next byte's address (low first) |
+| +4..+6 | `$0404` | `$0414` | `$0424` | COUNT, the bytes left |
+| +8 | `$0408` | `$0418` | `$0428` | CTRL: 0 EN, 1 DIR (1 = memory to device), 2 TC on the last byte (channel 2: always 0), 3 IE |
+| +9 | `$0409` | `$0419` | `$0429` | STATUS: 7 BUSY, 6 DRQ (channel 2: always 1), 0 DONE (write 1 to clear) |
 
-Load ADDR and COUNT, then write CTRL with EN set. DONE comes when COUNT is
-0 and every byte is in memory; with IE it raises the CPU's IRQ, through
-bit 1 or 2 of `$0440`. Writing EN = 0 stops a channel early; once BUSY
+`$0430`-`$043F` reads 0. Load ADDR and COUNT, then write CTRL with EN set.
+DONE comes when COUNT is 0 and every byte is in memory; with IE it raises
+the CPU's IRQ, through bit 1, 2 or 6 of `$0440`. Channels that want the bus
+take turns, and a CPU access to the cards waits at most one DMA cycle, even
+behind channel 2 running back to back.
+
+For channel 2, latch the ENC's data window first (write `$80`, `$82` or
+`$84` to `$0850` for `EGPDATA`, `ERXDATA` or `EUDADATA`), then start the
+channel; until DONE, nothing may access the ENC, its interrupt probe
+included, or the latch moves (`docs/DMA.md`, Ethernet). Writing EN = 0 stops a channel early; once BUSY
 clears, ADDR and COUNT say where it stopped. ADDR and COUNT can't be written
 while BUSY. The engine's writes go past the cache, which drops any line
 they change, and it waits for the cache's posted store before reading.
@@ -424,7 +432,7 @@ the chips that are; `$0441` chooses which of them reach the line.
 
 | Address | Register |
 |---|---|
-| `$0440` | ISTAT, read only: 0 the tick timer, 1 DMA channel 0, 2 DMA channel 1, 3 the cards' `IRQ#`, 4 the SCC, 5 the power key (`$0480`, which has its own enable, off at reset) |
+| `$0440` | ISTAT, read only: 0 the tick timer, 1 DMA channel 0, 2 DMA channel 1, 3 the cards' `IRQ#`, 4 the SCC, 5 the power key (`$0480`, which has its own enable, off at reset), 6 DMA channel 2 (Ethernet) |
 | `$0441` | IMASK: 1 = that source reaches `IRQ`; `$FF` at reset |
 
 Bit 4 is the SCC emulated in the FPGA. The real Z85C80 on the carrier will

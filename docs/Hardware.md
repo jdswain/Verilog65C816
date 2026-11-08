@@ -564,15 +564,16 @@ proposed earlier. Source: DS39935C.
 * **Software:** unlike the W5100S it has no TCP/IP of its own; the 65C816
   runs the stack. em16 emulates it (`EmEth.Mod`, `-net`), so drivers can be
   written before the carrier exists.
-* **DMA (Open), FPGA only.** The chip has no DMA request pin and needs none.
+* **DMA (Built in the FPGA; DMA channel 2, `docs/DMA.md`).** The chip has
+  no DMA request pin and needs none.
   Its packet buffer is read and written through auto-incrementing data
   windows (`EGPDATA`, `ERXDATA` and `EUDADATA`, 7E80h-7E85h), which are
   always ready. One write to `$0850` latches a window's address; after that,
-  every access to `$0851` moves the next byte. A third channel in `dma.v`
-  could run that unpaced: select 5 with `ext_a` = 1 instead of a `/DACK`
-  slot, its registers at `$0420`. It would have to let the CPU's external
-  cycles in between its bytes, or a 1.5 KB frame (about 0.6 ms at 400 ns a
-  byte) would hold off the SCC. While it runs, nothing may touch the
+  every access to `$0851` moves the next byte. Channel 2 of `dma.v` runs
+  that unpaced: select 5 with `ext_a` = 1 instead of a `/DACK` slot, its
+  registers at `$0420`, its DONE on ISTAT bit 6. The CPU's external cycles
+  still get in between its bytes, so a 1.5 KB frame (about 0.6 ms at
+  400 ns a byte) doesn't hold off the SCC. While it runs, nothing may touch the
   chip's other registers, because that moves the latch. That includes the
   interrupt probe's read of `ESTAT`, so the driver clears `EIE.INTIE` for
   the transfer. The carrier needs no change for it.
@@ -1054,7 +1055,7 @@ repository's `gerbers/`).
    * ~~the interrupt register~~ (done, with the tick timer)
    * ~~the `.cst` pin moves~~ (done)
    * ~~soft power and the power LED at `$0480`~~ (done)
-   * an Ethernet DMA channel (**Open**; see [Ethernet](#ethernet))
+   * ~~an Ethernet DMA channel~~ (done: DMA channel 2, `$0420`)
 5. ~~Lay out the 65-16 board from the schematic~~ (done: routed, Gerbers in
    the 65-16 repository). Order it, assemble it and bring it up.
 6. Software: the ENC424J600 driver, OS16's shutdown through `$0482` and its

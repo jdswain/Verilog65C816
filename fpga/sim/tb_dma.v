@@ -1,6 +1,6 @@
 // tb_dma.v -- the DMA engine (dma.v) with the bridge (external_bus.v) and
 // port 2's arbiter (mm_mux.v), against a model of port 2's memory, a
-// 74HCT138 on the select code, and models of the two chips:
+// 74HCT138 on the select code, and models of the three chips:
 //
 //   an 82077AA (channel 1, slot 1): a 16-byte FIFO that a read fills one
 //     byte every BYTE_T clocks and that overruns if the engine falls behind;
@@ -10,6 +10,10 @@
 //   a 53C80 (channel 0, slot 4): DRQ cleared by /DACK falling and raised
 //     again a few clocks after the strobe; it can change phase partway,
 //     after which it asks for nothing more.
+//   an ENC424J600 (channel 2, slot 5): no request line; its data port at
+//     A3-A0 = 1 hands out the next receive byte on each read and takes the
+//     next transmit byte on each write. A write at A3-A0 = 0 is the address
+//     latch, which only the CPU may touch.
 //
 // A second master writes on port 2 throughout, as the blitter would. The
 // checks: bytes land where they should and nowhere else (unaligned starts
@@ -17,7 +21,10 @@
 // interrupt, a stop partway with ADDR and COUNT read back, both channels at
 // once with no FIFO overrun, a CPU cycle in the middle of a transfer, a
 // read held off while the cache has a store in flight, registers that do
-// not change while BUSY, and COUNT = 0.
+// not change while BUSY, and COUNT = 0. Channel 2: a frame each way, all
+// three channels at once with no FIFO overrun, a CPU access waiting at most
+// one DMA cycle while channel 2 runs back to back, no TC and no latch
+// write from it, and its registers' fixed bits.
 //
 //   iverilog -g2005 -o tb_dma rtl/dma.v rtl/mm_mux.v rtl/external_bus.v sim/tb_dma.v && vvp tb_dma
 `timescale 1ns/1ps
@@ -38,11 +45,11 @@ module tb_dma;
     //------------------------------------------------------------------
     // The engine, the bridge and the arbiter
     //------------------------------------------------------------------
-    reg  [4:0] r_addr; reg [7:0] r_wdata; reg r_cs, r_we;
+    reg  [5:0] r_addr; reg [7:0] r_wdata; reg r_cs, r_we;
     wire [7:0] r_rdata; wire irq;
     reg  wr_busy;
 
-    wire       bq, bwe, btc, back; wire [2:0] bslot; wire [7:0] bwd, bus_rdata;
+    wire       bq, bwe, btc, back; wire [2:0] bslot; wire [3:0] baddr; wire [7:0] bwd, bus_rdata;
     wire       dm_req, dm_we, dm_done, dm_rvalid; wire [20:0] dm_addr;
     wire [31:0] dm_wdata; wire [3:0] dm_wmask;
     wire       p_req, p_we, p_done, p_rvalid; wire [20:0] p_addr;
@@ -51,13 +58,14 @@ module tb_dma;
     reg        bl_req, bl_we; reg [20:0] bl_addr; reg [31:0] bl_wdata;
     wire       bl_done, bl_rvalid;
     wire [1:0] drq;
+    wire [2:0] irq_ch;
 
     dma u_dma (
         .clk(clk), .rst_n(rst_n),
         .reg_addr(r_addr), .wdata(r_wdata), .rdata(r_rdata),
-        .cs(r_cs), .we(r_we), .irq(irq),
+        .cs(r_cs), .we(r_we), .irq(irq), .irq_ch(irq_ch),
         .drq(drq),
-        .b_req(bq), .b_we(bwe), .b_slot(bslot), .b_tc(btc), .b_wdata(bwd),
+        .b_req(bq), .b_we(bwe), .b_slot(bslot), .b_addr(baddr), .b_tc(btc), .b_wdata(bwd),
         .b_rdata(bus_rdata), .b_ack(back),
         .m_req(dm_req), .m_we(dm_we), .m_addr(dm_addr),
         .m_wdata(dm_wdata), .m_wmask(dm_wmask),
@@ -88,7 +96,7 @@ module tb_dma;
         .clk(clk), .rst_n(rst_n),
         .addr(c_addr), .wdata(c_wdata), .rdata(bus_rdata),
         .req(c_req), .we(c_we), .ack(c_ack),
-        .dma_req(bq), .dma_we(bwe), .dma_slot(bslot), .dma_tc(btc),
+        .dma_req(bq), .dma_we(bwe), .dma_slot(bslot), .dma_addr(baddr), .dma_tc(btc),
         .dma_wdata(bwd), .dma_ack(back),
         .card_reset(1'b0), .irq(),
         .ext_a(ext_a), .ext_d_in(d_in), .ext_d_out(d_out), .ext_d_oe(d_oe),
@@ -222,13 +230,32 @@ module tb_dma;
         else if (!s_dack && s_taken < s_total && s_taken < s_stop) s_drq = 1;
     end
 
-    // Data on the bus during a read: whichever /DACK, or a register of slot 0.
+    //------------------------------------------------------------------
+    // The ENC424J600: slot 5, channel 2. No request line.
+    //------------------------------------------------------------------
+    integer    e_rd, e_wr, e_latches, e_bad_a;
+    reg [7:0]  e_latch;
+    reg [7:0]  e_got [0:2047];
+    wire e_cs = ~cs_n[5];
+    initial begin e_rd = 0; e_wr = 0; e_latches = 0; e_bad_a = 0; e_latch = 8'h00; end
+    always @(posedge rd_n) if (e_cs) begin
+        if (ext_a == 4'd1) e_rd = e_rd + 1; else e_bad_a = e_bad_a + 1;
+    end
+    always @(posedge wr_n) if (e_cs) begin
+        if (ext_a == 4'd1) begin e_got[e_wr] = d_out; e_wr = e_wr + 1; end
+        else if (ext_a == 4'd0) begin e_latch = d_out; e_latches = e_latches + 1; end
+        else e_bad_a = e_bad_a + 1;
+    end
+
+    // Data on the bus during a read: whichever /DACK, the ENC's data port,
+    // or a register of slot 0.
     reg [7:0] card0 [0:15];
     always @* begin
         d_in = 8'hFF;
         if (!rd_n) begin
             if (f_dack)        d_in = f_fifo[f_head];
             else if (s_dack)   d_in = 8'h50 ^ s_taken[7:0];
+            else if (e_cs)     d_in = 8'hC3 ^ e_rd[7:0];
             else if (!cs_n[0]) d_in = card0[ext_a];
         end
     end
@@ -252,22 +279,22 @@ module tb_dma;
     end
 
     //------------------------------------------------------------------
-    task rw(input [4:0] a, input [7:0] d);
+    task rw(input [5:0] a, input [7:0] d);
         begin
             @(negedge clk); r_addr = a; r_wdata = d; r_we = 1; r_cs = 1;
             @(negedge clk); r_cs = 0; r_we = 0;
         end
     endtask
-    task rr(input [4:0] a, output [7:0] d);
+    task rr(input [5:0] a, output [7:0] d);
         begin @(negedge clk); r_addr = a; #1 d = r_rdata; end
     endtask
-    task setup(input ch, input [23:0] ad, input [23:0] n);
+    task setup(input [1:0] ch, input [23:0] ad, input [23:0] n);
         begin
             rw({ch, 4'h0}, ad[7:0]);  rw({ch, 4'h1}, ad[15:8]);  rw({ch, 4'h2}, ad[23:16]);
             rw({ch, 4'h4}, n[7:0]);   rw({ch, 4'h5}, n[15:8]);   rw({ch, 4'h6}, n[23:16]);
         end
     endtask
-    task wait_done(input ch, input integer limit);
+    task wait_done(input [1:0] ch, input integer limit);
         reg [7:0] st; integer t;
         begin
             t = 0; rr({ch, 4'h9}, st);
@@ -275,9 +302,21 @@ module tb_dma;
             if (!st[0]) begin $display("FAIL channel %0d never DONE", ch); errors = errors + 1; end
         end
     endtask
-    task wait_idle(input ch);
+    task wait_idle(input [1:0] ch);
         reg [7:0] st;
         begin rr({ch, 4'h9}, st); while (st[7]) rr({ch, 4'h9}, st); end
+    endtask
+    // A CPU access through the bridge; `waited` is the clocks to ack. A bus
+    // cycle is 3T+H+2 = 13 clocks here, so a CPU access that waits behind
+    // at most one DMA cycle has ack within CPU_MAX clocks.
+    localparam integer CPU_MAX = 2 * 13;
+    integer waited;
+    task cpu(input [10:0] a, input w, input [7:0] d, output [7:0] q);
+        begin
+            @(posedge clk); c_addr <= a; c_we <= w; c_wdata <= d; c_req <= 1; waited = 0;
+            @(posedge clk); while (!c_ack) begin @(posedge clk); waited = waited + 1; end
+            q = bus_rdata; c_req <= 0;
+        end
     endtask
     function [23:0] get24(input [7:0] a, input [7:0] b, input [7:0] c3);
         get24 = {c3, b, a};
@@ -411,12 +450,109 @@ module tb_dma;
         rr(5'h19, v); check("DONE at once", v & 8'h81, 8'h01);
         check("no cycle", f_taken, 0);
 
+        //--------------------------------------------------------------
+        $display("-- Ethernet receive: 1518 bytes to $7001, unpaced, IE --");
+        rw(6'h29, 8'h01);                       // (channel 2 idle: DONE clear)
+        cpu(11'h050, 1, 8'h82, v);              // latch ERXDATA, as the driver would
+        check("latch set", e_latch, 8'h82);
+        e_rd = 0; e_latches = 0; e_bad_a = 0;
+        setup(2, 24'h007001, 24'd1518);
+        cyc0 = $time;
+        rw(6'h28, 8'h0D);                       // IE, TC (ignored), read, EN
+        rr(6'h28, v); check("CTRL: TC reads 0 on channel 2", v, 8'h09);
+        rr(6'h29, v); check("STATUS: BUSY, DRQ always 1", v & 8'hC0, 8'hC0);
+        wait_done(2, 400000);
+        $display("  1518 bytes in %0d ns: %0d KB/s", $time - cyc0, 1518 * 1000000 / ($time - cyc0));
+        check("irq", irq, 1'b1);
+        check("irq_ch[2]", irq_ch, 3'b100);
+        bad = 0;
+        for (i = 0; i < 1518; i = i + 1) if (mem[16'h7001 + i] !== (8'hC3 ^ i[7:0])) bad = bad + 1;
+        check("bytes wrong", bad, 0);
+        check("byte before", mem[16'h7000], 8'hEE);
+        check("byte after", mem[16'h7001 + 1518], 8'hEE);
+        check("data-port reads", e_rd, 1518);
+        check("latch writes by DMA", e_latches, 0);
+        check("other ENC addresses", e_bad_a, 0);
+        rw(6'h29, 8'h01);
+        check("irq cleared", irq, 1'b0);
+
+        //--------------------------------------------------------------
+        $display("-- Ethernet transmit: 300 bytes from $8002 --");
+        for (i = 0; i < 300; i = i + 1) mem[16'h8002 + i] = 8'h3C ^ i[7:0];
+        e_wr = 0; e_latches = 0; e_bad_a = 0;
+        setup(2, 24'h008002, 24'd300);
+        rw(6'h28, 8'h03);                       // write, EN
+        wait_done(2, 200000);
+        bad = 0;
+        for (i = 0; i < 300; i = i + 1) if (e_got[i] !== (8'h3C ^ i[7:0])) bad = bad + 1;
+        check("bytes wrong", bad, 0);
+        check("data-port writes", e_wr, 300);
+        check("latch writes by DMA", e_latches, 0);
+        check("no irq without IE", irq, 1'b0);
+        rw(6'h29, 8'h01);
+
+        //--------------------------------------------------------------
+        $display("-- all three at once, and the CPU while channel 2 runs --");
+        BYTE_T = 60;
+        f_rd = 1; f_total = 400; f_made = 0; f_taken = 0; f_tc_at = -1; f_overrun = 0;
+        s_rd = 1; s_total = 500; s_stop = 1 << 30; s_taken = 0; s_tc_at = -1;
+        e_rd = 0; e_latches = 0; e_bad_a = 0;
+        setup(1, 24'h009000, 24'd400);
+        setup(0, 24'h00A003, 24'd500);
+        setup(2, 24'h00B001, 24'd1200);
+        rw(6'h18, 8'h05);
+        rw(6'h08, 8'h05);
+        rw(6'h28, 8'h01);
+        repeat (1500) @(posedge clk);
+        cpu(11'h00A, 0, 8'h00, v);
+        check("CPU read during three channels", v, 8'h3A);
+        $display("  the CPU waited %0d clocks", waited);
+        if (waited > CPU_MAX) begin $display("FAIL the CPU waited more than one DMA cycle"); errors = errors + 1; end
+        wait_done(1, 600000);
+        wait_done(0, 600000);
+        wait_done(2, 600000);
+        check("FIFO overruns", f_overrun, 0);
+        bad = 0;
+        for (i = 0; i < 400; i = i + 1) if (mem[16'h9000 + i] !== (8'hA0 ^ i[7:0])) bad = bad + 1;
+        check("floppy bytes wrong", bad, 0);
+        bad = 0;
+        for (i = 0; i < 500; i = i + 1) if (mem[16'hA003 + i] !== (8'h50 ^ i[7:0])) bad = bad + 1;
+        check("SCSI bytes wrong", bad, 0);
+        bad = 0;
+        for (i = 0; i < 1200; i = i + 1) if (mem[16'hB001 + i] !== (8'hC3 ^ i[7:0])) bad = bad + 1;
+        check("Ethernet bytes wrong", bad, 0);
+        check("floppy TC", f_tc_at, 399);
+        check("SCSI TC", s_tc_at, 499);
+        check("latch writes by DMA", e_latches, 0);
+        rw(6'h09, 8'h01); rw(6'h19, 8'h01); rw(6'h29, 8'h01);
+
+        //--------------------------------------------------------------
+        $display("-- channel 2 alone: the CPU still gets in --");
+        e_rd = 0;
+        setup(2, 24'h00C000, 24'd2000);
+        rw(6'h28, 8'h01);
+        repeat (300) @(posedge clk);
+        for (i = 0; i < 4; i = i + 1) begin
+            cpu(11'h003, 0, 8'h00, v);
+            if (waited > CPU_MAX) begin $display("FAIL CPU waited %0d clocks behind channel 2", waited); errors = errors + 1; end
+        end
+        check("CPU read", v, 8'h33);
+        wait_done(2, 400000);
+        check("data-port reads", e_rd, 2000);
+        rw(6'h29, 8'h01);
+
+        //--------------------------------------------------------------
+        $display("-- no fourth channel --");
+        rw(6'h30, 8'h12); rw(6'h38, 8'h01);
+        rr(6'h30, v); check("$0430 reads 0", v, 8'h00);
+        rr(6'h39, v); check("$0439 reads 0", v, 8'h00);
+
         bl_on = 0;
         $display("  %0d port 2 transactions", port_txns);
         if (errors == 0) $display("PASS"); else $display("FAIL (%0d)", errors);
         $finish;
     end
 
-    initial begin #20000000; $display("FAIL timeout"); $finish; end
+    initial begin #60000000; $display("FAIL timeout"); $finish; end
 endmodule
 `default_nettype wire

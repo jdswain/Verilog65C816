@@ -1,12 +1,13 @@
-# DMA for SCSI and the floppy
+# DMA for SCSI, the floppy and Ethernet
 
 **Built in the FPGA** (`rtl/dma.v`, `rtl/mm_mux.v`, tested by `sim/tb_dma.v`
 and `rom/dmatest.asm`), and in em16 (`EmDMA.Mod`, tested by `test/dma.sh`);
-the OS16 drivers are still to do. A two-channel DMA
+the OS16 drivers are still to do. A three-channel DMA
 engine in the FPGA that moves bytes between
-SDRAM and the carrier's 53C80 (SCSI) and 82077AA (floppy), with a model of
-it in em16 and DMA modes in em16's two chips, so that OS16's drivers can use
-it before the carrier exists. `Hardware.md` (DMA) has the pins and the
+SDRAM and the carrier's 53C80 (SCSI), 82077AA (floppy) and ENC424J600
+(Ethernet), with a model of it in em16 and DMA modes in em16's two disk
+chips, so that OS16's drivers can use it before the carrier exists. The
+Ethernet channel (channel 2) is in the FPGA only so far; em16 is to follow. `Hardware.md` (DMA) has the pins and the
 carrier's side; this document is the engine itself.
 
 ## Why
@@ -25,9 +26,10 @@ data phase, and the same engine serves both.
 ```
         53C80 DRQ ──► DRQ0 ┐                   ┌──► port 2 ──► SDRAM
      82077AA DRQ ──► DRQ1 ┤   dma.v            │   (shared with the
-                          │   2 channels ──────┤    blitter: mm_mux)
+  (ENC424J600: no request) │   3 channels ──────┤    blitter: mm_mux)
                           │   registers $0400  │
    /DACK (select codes 4, 1)◄─┤                └──► cache invalidation
+   ENC data port ($0851) ◄─┤
    TC ◄───────────────────┤
                           └──► external_bus.v DMA port (one cycle at a time,
                                                      ahead of the CPU's)
@@ -37,17 +39,21 @@ data phase, and the same engine serves both.
 |---|---|---|---|---|
 | 0 | 53C80 | `DRQ0`, pin 79 | select code 4 (`$0840` slot) | `TC`, inverted to `/EOP` |
 | 1 | 82077AA | `DRQ1`, pin 80 | select code 1 (`$0810` slot) | `TC` |
+| 2 | ENC424J600 | none: always ready | select code 5, A3-A0 = 1: the data port `$0851` | none |
 
 The channel-to-device mapping is fixed. Each channel has a 24-bit address
 and a 24-bit count and moves one byte per external bus cycle. On the memory
 side bytes are gathered into words for writes and read sixteen at a time,
 so the SDRAM sees one transaction per four or sixteen bytes.
 
-**Ethernet (Open).** The ENC424J600 needs no request pin: its packet
-buffer's data windows are always ready, so a third channel could move a
-frame unpaced, through select 5 with `ext_a` = 1 (`$0851`, the latched
-window) instead of a `/DACK` slot. `Hardware.md` (Ethernet) has the
-details; nothing on the carrier changes for it. Software must leave the
+**Ethernet.** The ENC424J600 needs no request pin: its packet buffer's
+data windows are always ready, so channel 2 moves a frame unpaced, through
+select 5 with `ext_a` = 1 (`$0851`, the latched window) instead of a
+`/DACK` slot, and never with `TC`. Software latches the window first (a
+write of `$80`, `$82` or `$84` to `$0850` for `EGPDATA`, `ERXDATA` or
+`EUDADATA`); the chip's own window pointer does the rest. `Hardware.md`
+(Ethernet) has the details; nothing on the carrier changes for it.
+Software must leave the
 chip alone while a transfer runs, interrupts included: the interrupt probe
 reads `ESTAT`, which moves the latch, so the driver clears `EIE.INTIE` for
 the length of the transfer and the probe doesn't read the chip meanwhile
@@ -73,8 +79,9 @@ faster.
 ## Registers
 
 At `$0400`, in the unclaimed `$0400`-`$04FF` range. The device decodes
-`$0400`-`$043F`: `addr[4]` picks the channel and `addr[5]` is ignored, so
-the pair repeats at `$0420`. Each channel has 16 bytes:
+`$0400`-`$043F`: `addr[5:4]` picks the channel, and `$0430`-`$043F`, a
+fourth that doesn't exist, reads 0 and ignores writes. Each channel has 16
+bytes:
 
 | Offset | Register | Read | Write |
 |---|---|---|---|
@@ -86,7 +93,7 @@ the pair repeats at `$0420`. Each channel has 16 bytes:
 | +9 | STATUS | see below | bit 0: 1 clears DONE |
 | +A-+F | | 0 | ignored |
 
-Channel 0 is at `$0400`, channel 1 at `$0410`.
+Channel 0 is at `$0400`, channel 1 at `$0410`, channel 2 at `$0420`.
 
 **CTRL**
 
@@ -94,7 +101,7 @@ Channel 0 is at `$0400`, channel 1 at `$0410`.
 |---|---|---|
 | 0 | EN | 1 starts the channel and clears DONE, if it is not BUSY (if it is running it keeps running); 0 stops it |
 | 1 | DIR | 0: device to memory (a read from the disk). 1: memory to device |
-| 2 | TC | assert `TC` during the last byte's cycle |
+| 2 | TC | assert `TC` during the last byte's cycle. Channel 2: always 0 |
 | 3 | IE | interrupt while DONE is set |
 | 7-4 | | 0 |
 
@@ -103,7 +110,7 @@ Channel 0 is at `$0400`, channel 1 at `$0410`.
 | Bit | Name | |
 |---|---|---|
 | 7 | BUSY | the channel is running, or has bytes still to write to memory |
-| 6 | DRQ | the request line, as synchronised (for debugging) |
+| 6 | DRQ | the request line, as synchronised (for debugging). Channel 2: always 1 |
 | 0 | DONE | the count reached 0 and every byte is in memory (or out on the bus) |
 
 **The rules:**
@@ -124,9 +131,9 @@ Channel 0 is at `$0400`, channel 1 at `$0410`.
   target changes phase before the count runs out.
 * COUNT and ADDR change while the channel runs; reading three bytes of a
   running channel can tear. Stop it first, or wait for DONE.
-* IRQ: the engine raises the CPU's IRQ while either channel has DONE and IE
-  set; bits 1 and 2 of the interrupt status at `$0440` say which. Writing 1
-  to STATUS bit 0 clears it.
+* IRQ: the engine raises the CPU's IRQ while any channel has DONE and IE
+  set; bits 1, 2 and 6 of the interrupt status at `$0440` say which
+  (channels 0, 1 and 2). Writing 1 to STATUS bit 0 clears it.
 
 ### Programming a transfer
 
@@ -151,7 +158,7 @@ Channel 0 is at `$0400`, channel 1 at `$0410`.
 
 ## The engine
 
-`rtl/dma.v`, one module with two channel contexts, a memory-side state
+`rtl/dma.v`, one module with three channel contexts, a memory-side state
 machine and a bus-side state machine. Only one external bus cycle can
 happen at a time, so the channels take turns for the bus; each has its own
 memory buffers.
@@ -160,10 +167,17 @@ memory buffers.
 
 A channel wants the bus when it is enabled, COUNT is not 0, its DRQ is
 high, and (memory to device) its next byte is in its line buffer, or
-(device to memory) its write buffer has room. When both want it, they take
-turns: the one that didn't have the last cycle gets the next. The floppy
-then waits at most one SCSI cycle, about 0.5 µs, against a FIFO that lasts
-128 µs at 1 Mbit/s and more at the slower rates.
+(device to memory) its write buffer has room. When more than one want it,
+they take turns, round robin from the one that had the last cycle. The
+floppy then waits at most two other cycles, about 1 µs, against a FIFO that
+lasts 128 µs at 1 Mbit/s and more at the slower rates.
+
+Channel 2 has no DRQ: it wants the bus whenever it is enabled with bytes
+left and its buffer ready, so it runs back to back. That doesn't lock the
+CPU out. The bridge spends a clock idle after every DMA cycle before the
+engine can ask again, and a waiting CPU access starts in it, so the CPU
+still waits at most one DMA cycle (`tb_dma` checks this with channel 2 alone
+and with all three running).
 
 ### The bus cycle
 
@@ -172,10 +186,10 @@ address:
 
 | | CPU cycle | DMA cycle |
 |---|---|---|
-| select code | `addr[6:4]` | 4 (channel 0) or 1 (channel 1) |
-| `ext_a[3:0]` | `addr[3:0]` | 0 (the chips ignore it during `/DACK`) |
+| select code | `addr[6:4]` | 4 (channel 0), 1 (channel 1) or 5 (channel 2) |
+| `ext_a[3:0]` | `addr[3:0]` | 0 (the chips ignore it during `/DACK`); 1 on channel 2, the ENC's data port |
 | strobe | `RD#` read, `WR#` write | `RD#` device to memory, `WR#` memory to device |
-| `TC` | low | high from T1 until the enable rises (40 ns after the strobe), on the last byte when CTRL.TC |
+| `TC` | low | high from T1 until the enable rises (40 ns after the strobe), on the last byte when CTRL.TC; never on channel 2 |
 | timing | T1-T3 as in `Hardware.md` | the same |
 
 The bridge takes a DMA request before a CPU one when both are waiting at
@@ -250,13 +264,16 @@ transactions.
   hold-off and the synchroniser: about 17 clocks, 1.5 MB/s at best.
   `tb_dma` measures 1.26 MB/s against a 53C80 model that raises DRQ again 5
   clocks after each strobe. The floppy needs at most 125 KB/s (2.88M), so
-  it is never kept waiting long.
+  it is never kept waiting long. Channel 2, with no DRQ to wait for,
+  measures 1.57 MB/s; a 10 Mbit/s link fills the buffer at 1.25 MB/s.
 * **SDRAM:** at the full SCSI rate, one word write every 2 µs, a few percent
   of the controller's time.
 * **Logic:** measured in the Gowin build, the engine and `mm_mux` add about
   760 flip-flops and 1,340 logic cells: the SoC went from 72% to 78% of the
-  logic, still at 33.5 MHz against 25.2. The line buffers (2 x 128 bits) are
-  the first thing to shrink if room runs short.
+  logic, still at 33.5 MHz against 25.2. Channel 2 (with the power block,
+  Nov 2026) took the SoC from 84% to 87% of the logic and from 28% to 30%
+  of the registers, at 42.9 MHz against the 40.5 MHz system clock. The line
+  buffers (3 x 128 bits) are the first thing to shrink if room runs short.
 
 ## Signals, pins and the carrier
 
@@ -357,6 +374,9 @@ The driver work, in outline (the drivers are OS16's to design):
   now. Count = the bytes the command should move, TC on; wait for DONE or
   the 53C80's interrupt; stop the channel, read COUNT, clear DMA mode.
 * **InterruptManager:** a probe for the engine (STATUS of each channel).
+* **Ethernet:** frames in and out of the ENC424J600's buffer by channel 2,
+  with the latch set first and the chip left alone until DONE (OS16
+  `doc/OS16_Network_Plan.md` §11).
 
 ## Plan
 
@@ -385,6 +405,14 @@ Each step can be tested before the next starts.
    interrupts on and other processes running.
 5. **The carrier:** the DMA wiring and pull-downs, and the **Check** items
    above against the datasheets and the board.
+
+6. **Done (FPGA).** Channel 2 for the ENC424J600: no request line, select 5
+   with A3-A0 = 1 and no `TC`, round-robin turns among the three channels,
+   its DONE on ISTAT bit 6. `tb_dma` adds a model of the chip's data port:
+   a frame each way, all three channels at once with no FIFO overrun, the
+   CPU waiting at most one DMA cycle while channel 2 runs back to back, and
+   no write to the address latch from the engine. em16 and the OS16 driver
+   are to follow.
 
 Steps 1-2 are this repository's and step 3 is 65Tools'. They don't depend on
 each other, since em16 implements the registers as this document gives them.
