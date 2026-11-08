@@ -32,13 +32,14 @@ Each item is marked:
 | Two serial ports, Mac Mini-DIN-8s at RS-422/423 levels | Z85C80 SCC half, a 26C31 and two 26C32s | Carrier | Drawn |
 | SCSI, an internal 50-pin header and an external DB-25 | Z85C80 SCSI half (53C80) | Carrier | Drawn |
 | Floppy, one 34-pin header for two drives, 2.88 MB capable | 82077AA | Carrier | Drawn |
-| DMA, two channels | | FPGA | Built; untested on the board |
+| DMA, three channels: SCSI, floppy, Ethernet | | FPGA | Built; untested on the board |
 | Interrupt status and mask | | FPGA | Built |
 | Tick timer, the operating system's clock | | FPGA | Built |
 | Sound, two SIDs | reDIP SID emulation | FPGA, onboard I2S amplifier; stereo DAC optional on the carrier | Built |
 | Ethernet | ENC424J600, parallel mode 5 | Carrier, on the external bus, select 5 | Drawn |
 | SD card, a test boot device | `sd_spi.v`, SPI mode | The Tang Nano's microSD slot | Built; untested on the board |
 | Power | 24-pin ATX header; +5V, +3.3V, +12V, -12V from the supply; soft power from the ADB power key | Carrier | Drawn |
+| Real-time clock, battery-backed | DS12C887 (MC146818-compatible) | A card in the slot (select 6), later the final board's bus; NTP over Ethernet as well | Open |
 | Encryption engine | | | Open |
 
 The TIM bus as such is not implemented, but the carrier has one slot in the
@@ -621,6 +622,55 @@ connected. A 68881 on a card would need its `DSACK` handshake honoured, which
 means a wait input into the bridge; `RDY` is wired to nothing because no FPGA
 pin is spare for it, and DDC data (52), the last spare, is the only candidate.
 
+## Real-time clock
+
+**Open.** The carrier has no clock that keeps time while the power is off.
+Two routes, which work together:
+
+* **NTP**, once the ENC424J600 driver and UDP work. OS16 asks a time server
+  at boot and from time to time, and the tick timer's TICKS carries the time
+  in between. Before the network is up, or offline, the time is unknown, and
+  so are the dates of files written meanwhile.
+* **A battery-backed RTC on the external bus, through the slot.** Selects 6
+  and 7 go only to the slot (`/DEVSEL` at `$0860`, `/IOSEL` at `$0870`), and
+  the slot carries `D0`-`D7`, `A0`-`A3`, the raw `RD#` and `WR#` (pins 35 and
+  36), `/RES`, `/IRQ` and +5V. A small card in another SlotBoard slot can
+  therefore carry an RTC, with no FPGA pins and no change to the 65-16.
+
+The part: a **DS12C887**, the MC146818-compatible clock of the PC AT: 5V,
+its crystal and lithium cell inside the package.
+
+* **Intel bus mode** (`MOT` to ground). Its address and data share one bus:
+  the register index is latched by `AS`, then data moves with `RD#` or `WR#`
+  while `/CS` is low.
+* **The card's glue**, a couple of gates, as the PC AT's ports 70h and 71h
+  did it: `AS` pulses during a write to `$0860` (A0 = 0, select 6, `WR#`),
+  and `/CS` is low only for `$0861` (A0 = 1), so the index write doesn't
+  also write data:
+
+  ```
+          lda #reg
+          sta $0860               ; the register index (AS)
+          lda $0861               ; its data (/CS with RD#)
+  ```
+* **Interrupt:** its open-drain `/IRQ` (alarm, periodic, update-ended) to the
+  slot's `/IRQ`, which reaches the shared interrupt node through the
+  carrier's SS14.
+* **Check** the bus timing against the DS12C887 datasheet:
+  * the read strobe (238 ns here) against its minimum
+  * data valid after `RD#` falls
+  * the index's setup and hold around `AS` falling. The index is on the bus
+    from the start of the write cycle until 40 ns after `WR#` rises.
+  * the time from the index write to the data access, about 480 ns here
+
+  It is the class of part made for the PC AT's 8 MHz bus, which ours is
+  modelled on, so it should fit.
+* **The final board** puts the same chip on its own bus, with a select of its
+  own.
+
+Simpler 4-bit parts (Epson RTC-72421, OKI MSM6242) need no glue, but they
+are slower on the bus and need a separate battery and crystal.
+
 ## SD card
 
 The Tang Nano's microSD slot, in SPI mode, as a test boot device. The
@@ -1084,4 +1134,8 @@ requirement for the final board.
 8. The final board, with the FPGA on it: the carrier's circuits, plus sound
    of its own, since the Tang Nano's MAX98357A amplifier and speaker
    connector go with the Tang Nano. That means the PCM5102A with a line-out
-   jack, and an amplifier for a speaker.
+   jack, and an amplifier for a speaker. And a battery-backed real-time
+   clock on its bus ([Real-time clock](#real-time-clock)).
+9. A real-time clock card for the slot: a DS12C887 at select 6 (`$0860`),
+   once its bus timing is checked ([Real-time clock](#real-time-clock)).
+   NTP in OS16 once Ethernet works.
