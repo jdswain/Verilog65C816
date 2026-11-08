@@ -524,6 +524,20 @@ therefore share them, with **no new pins**:
 * The control register's stereo bit sends the SIDs to separate channels;
   pin 51 low mutes the onboard speaker meanwhile.
 
+**Not on the 65-16 (rev A).** For development, a PCM5102A breakout module
+can be wired to the board instead. The three lines already reach the Tang
+Nano's socket on the carrier as named nets that go nowhere, so wires
+soldered to U3's pads (on the underside) are all it takes:
+
+| U3 pad (J5) | FPGA pin | Signal | PCM5102A |
+|---|---|---|---|
+| 7 | 56 | `I2S_BCLK` | BCK |
+| 11 | 55 | `I2S_LRCK` | LRCK (LCK) |
+| 8 | 54 | `I2S_DIN` | DIN |
+| | | +3.3V, ground | VIN (or 3.3V), GND; SCK to ground |
+
+To be set up and tested once the board works.
+
 ## Ethernet
 
 **Drawn:** a Microchip ENC424J600 (10/100 MAC and PHY with a 24 KB packet
@@ -1021,6 +1035,10 @@ repository's `gerbers/`).
 
 ### Stereo audio (optional)
 
+Not on the 65-16 (rev A): a breakout module can be wired to U3 for
+development ([Stereo on the carrier](#stereo-on-the-carrier)). A
+requirement for the final board.
+
 - [ ] A PCM5102A stereo DAC on the I2S lines from the edge header: BCLK
       (56), LRCK (55), DIN (54). Its SCK pin tied low, so it locks to BCLK
       ([Stereo on the carrier](#stereo-on-the-carrier)).
@@ -1061,3 +1079,9 @@ repository's `gerbers/`).
 6. Software: the ENC424J600 driver, OS16's shutdown through `$0482` and its
    use of the power key, and em16 models of both if software wants them
    before the board.
+7. On the 65-16 once it works: stereo through a PCM5102A module wired to
+   U3 ([Stereo on the carrier](#stereo-on-the-carrier)).
+8. The final board, with the FPGA on it: the carrier's circuits, plus sound
+   of its own, since the Tang Nano's MAX98357A amplifier and speaker
+   connector go with the Tang Nano. That means the PCM5102A with a line-out
+   jack, and an amplifier for a speaker.
