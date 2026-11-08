@@ -555,7 +555,8 @@ proposed earlier. Source: DS39935C.
   into a HanRun HR911105A jack with the transformers, the 75R common-mode
   network and two LEDs inside. **Check** the jack's LED pin polarity.
 * **Software:** unlike the W5100S it has no TCP/IP of its own; the 65C816
-  runs the stack. em16 does not emulate it.
+  runs the stack. em16 emulates it (`EmEth.Mod`, `-net`), so drivers can be
+  written before the carrier exists.
 
 The alternative was its SPI port, on the microSD slot's SPI lines with a
 spare pin as chip select. It was rejected: the slot's four pins (81-84) are
@@ -724,6 +725,8 @@ polled drivers to be written before the carrier exists:
 * the 82077AA at `$0800` (`Em82077.Mod`), with two floppy drives (`-disk0`,
   `-disk1`)
 * the 53C80 at `$0830` (`EmSCSI.Mod`), with a disk at SCSI ID 0 (`-scsi`)
+* the ENC424J600 at `$0850` (`EmEth.Mod`), on the Mac's network through
+  vmnet, or on UDP for tests (`-net`)
 
 Both can also move their data by DMA, with the SoC's engine (`EmDMA.Mod`).
 em16 has the tick timer and `$0440` as well (`EmTimer.Mod`). The 65Tools
