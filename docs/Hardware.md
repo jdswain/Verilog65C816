@@ -50,6 +50,12 @@ see [Slot](#slot).
 The Z85C80 SCSCI is a Z85C30 SCC and a Z53C80 (5380-compatible) SCSI
 controller in one 68-pin PLCC. It runs from 5V only (4.75-5.25V).
 
+**Chip enables, checked** against AMD's Am85C80 datasheet (its connection
+diagrams): `/CE1`, pin 64, is the SCC's chip enable and `/CE2`, pin 60, the
+53C80's `/CS`. The schematic symbol's 68 pins match the PLCC pinout. `CTSA`
+and `CTSB` have no pins of their own: they are tied inside the package to
+`/TRxCA` and `/TRxCB`.
+
 **The parts on hand are the 8 MHz grade**, so PCLK must not exceed 8 MHz. The
 Zilog product specification in hand covers only the 10 and 16 MHz grades.
 **Check:** the 8 MHz bus timings. The tables below use the 10 MHz figures,
@@ -445,8 +451,9 @@ the modem port, channel B the printer port.
   there are no external drivers.
 * **Drawn:** two connectors on the one bus, an internal 50-pin IDC header in
   the SCSI-1 ribbon pinout (odd pins ground) and an external DB-25 in the
-  Apple pinout. **Check** the DB-25 table on the schematic against an Apple
-  SCSI cable before fabrication.
+  Apple pinout. **Checked:** the DB-25 matches Apple's table (Technote
+  HW 10, Macintosh Plus) on all 25 pins. Pin 25 carries TERMPWR, as on
+  later Macs; the Mac Plus left it unconnected.
 * With two connectors the carrier is an end of the bus only while one of
   them is in use, so its terminators are four socketed 220/330 SIP packs:
   fitted then, pulled when both internal and external devices are attached
@@ -557,6 +564,18 @@ proposed earlier. Source: DS39935C.
 * **Software:** unlike the W5100S it has no TCP/IP of its own; the 65C816
   runs the stack. em16 emulates it (`EmEth.Mod`, `-net`), so drivers can be
   written before the carrier exists.
+* **DMA (Open), FPGA only.** The chip has no DMA request pin and needs none.
+  Its packet buffer is read and written through auto-incrementing data
+  windows (`EGPDATA`, `ERXDATA` and `EUDADATA`, 7E80h-7E85h), which are
+  always ready. One write to `$0850` latches a window's address; after that,
+  every access to `$0851` moves the next byte. A third channel in `dma.v`
+  could run that unpaced: select 5 with `ext_a` = 1 instead of a `/DACK`
+  slot, its registers at `$0420`. It would have to let the CPU's external
+  cycles in between its bytes, or a 1.5 KB frame (about 0.6 ms at 400 ns a
+  byte) would hold off the SCC. While it runs, nothing may touch the
+  chip's other registers, because that moves the latch. That includes the
+  interrupt probe's read of `ESTAT`, so the driver clears `EIE.INTIE` for
+  the transfer. The carrier needs no change for it.
 
 The alternative was its SPI port, on the microSD slot's SPI lines with a
 spare pin as chip select. It was rejected: the slot's four pins (81-84) are
@@ -850,17 +869,21 @@ dimension drawing, revision 3921).
 ## PCB requirements
 
 Everything the carrier board has to provide, in one list. Each line refers
-to the section that explains it. Ticked items are in the 65-16 schematic;
-the rest are layout.
+to the section that explains it. Ticked items are in the 65-16 schematic and
+on the routed board (180 x 150 mm, four layers, Gerbers in the 65-16
+repository's `gerbers/`).
 
 ### Connection to the Tang Nano
 
-- [ ] Sockets for the Tang Nano 20K's two edge headers. Every FPGA signal in
+- [x] Sockets for the Tang Nano 20K's two edge headers. Every FPGA signal in
       [Pins](#pins) except the microSD slot comes through them.
 - [x] A common ground with the Tang Nano, which the carrier powers through
       a jumper and a Schottky ([Power](#power)).
 - [ ] Clearance for the HDMI, USB-C and speaker connectors and the microSD
-      slot.
+      slot. HDMI faces out of the back edge. The USB-C plug clears the
+      parts in front of the Tang Nano, which stands high on its sockets
+      (checked on the layout). The speaker connector and the microSD slot
+      are still to place against Sipeed's drawing.
 
 ### Power
 
@@ -1009,15 +1032,19 @@ the rest are layout.
 
 ## Still to do
 
-1. Run a continuity check on the board for pins 25, 26, 31, 49, 71-76, 79, 80,
-   85 and 86, and turn **Sch** into **Board** in the tables.
+1. Run a continuity check on the board for pins 25, 26, 31, 49, 53, 71-76,
+   79, 80, 85 and 86, and turn **Sch** into **Board** in the tables.
 2. Confirm the **Check** items:
    * the Z85C80 8 MHz grade's bus timing
    * the 82077AA's bus timing (its DOR gating is confirmed)
    * the ENC424J600 crystal's load capacitance, and the HR911105A's LED
      pin polarity
-   * the DB-25 SCSI pinout against an Apple cable
-3. Decide the **Open** items: SCC DMA, and keyboard power-on.
+   * ~~the DB-25 SCSI pinout against an Apple cable~~ (matches Apple's
+     table, Technote HW 10)
+   * ~~the Z85C80's chip enables~~ (`/CE1` the SCC, `/CE2` the SCSI, per
+     the Am85C80 datasheet)
+3. Decide the **Open** items: SCC DMA. (~~Keyboard power-on~~ is soft
+   power; see [Power](#power).)
 4. RTL changes:
    * ~~Intel-only `external_bus.v` at the 8 MHz timing, with the SCC
      recovery hold-off~~ (done)
@@ -1026,5 +1053,10 @@ the rest are layout.
    * ~~the DMA engine and its multiplexer on the memory-master port~~ (done)
    * ~~the interrupt register~~ (done, with the tick timer)
    * ~~the `.cst` pin moves~~ (done)
-5. Lay out the 65-16 board from the schematic, and write the ENC424J600
-   driver (and an em16 model, if software wants it before the board).
+   * ~~soft power and the power LED at `$0480`~~ (done)
+   * an Ethernet DMA channel (**Open**; see [Ethernet](#ethernet))
+5. ~~Lay out the 65-16 board from the schematic~~ (done: routed, Gerbers in
+   the 65-16 repository). Order it, assemble it and bring it up.
+6. Software: the ENC424J600 driver, OS16's shutdown through `$0482` and its
+   use of the power key, and em16 models of both if software wants them
+   before the board.

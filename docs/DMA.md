@@ -43,6 +43,16 @@ and a 24-bit count and moves one byte per external bus cycle. On the memory
 side bytes are gathered into words for writes and read sixteen at a time,
 so the SDRAM sees one transaction per four or sixteen bytes.
 
+**Ethernet (Open).** The ENC424J600 needs no request pin: its packet
+buffer's data windows are always ready, so a third channel could move a
+frame unpaced, through select 5 with `ext_a` = 1 (`$0851`, the latched
+window) instead of a `/DACK` slot. `Hardware.md` (Ethernet) has the
+details; nothing on the carrier changes for it. Software must leave the
+chip alone while a transfer runs, interrupts included: the interrupt probe
+reads `ESTAT`, which moves the latch, so the driver clears `EIE.INTIE` for
+the length of the transfer and the probe doesn't read the chip meanwhile
+(OS16 `doc/OS16_Network_Plan.md` §11).
+
 ## Prerequisite: the external bus
 
 **Built** (step 1). The engine needs the bus as `Hardware.md` gives it:
