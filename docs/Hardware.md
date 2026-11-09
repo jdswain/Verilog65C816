@@ -39,7 +39,7 @@ Each item is marked:
 | Ethernet | ENC424J600, parallel mode 5 | Carrier, on the external bus, select 5 | Drawn |
 | SD card, a test boot device | `sd_spi.v`, SPI mode | The Tang Nano's microSD slot | Built; untested on the board |
 | Power | 24-pin ATX header; +5V, +3.3V, +12V, -12V from the supply; soft power from the ADB power key | Carrier | Drawn |
-| Real-time clock, battery-backed | DS12C887 (MC146818-compatible) | A card in the slot (select 6), later the final board's bus; NTP over Ethernet as well | Open |
+| Real-time clock, battery-backed | DS12C887 (MC146818-compatible) | Carrier (rev B), on the external bus, select 7; NTP over Ethernet as well | Drawn |
 | Encryption engine | | | Open |
 
 The TIM bus as such is not implemented, but the carrier has one slot in the
@@ -212,7 +212,7 @@ Seven selects are needed and the bus has four:
 | 4 | Z85C80 `/DACK` |
 | 5 | ENC424J600 `CS`, through the glue that makes it active high |
 | 6 | the slot's `/DEVSEL` |
-| 7 | the slot's `/IOSEL` |
+| 7 | the real-time clock, and the slot's `/IOSEL` |
 
 **Built:** the four select pins are a three-bit code plus an active-low
 enable, driving a 74HCT138. That uses the same four pins and gives eight
@@ -243,6 +243,7 @@ that saves a part. With seven selects needed the trade goes the other way.
 | Z85C80 SCC | `$0820` | `D//C` to `ext_a[0]`, `A//B` to `ext_a[1]` | +0 B control, +1 B data, +2 A control, +3 A data |
 | Z85C80 SCSI | `$0830` | A2-A0 to `ext_a[2:0]` | +0 to +7, the 5380 layout |
 | ENC424J600 | `$0850` | `ext_a[0]` picks the address latch or data; `ext_a[1]` is `AD8` | +0 write: address low byte with `AD8` = 0 (the SFRs, from 7E00h); +2 write: address low byte with `AD8` = 1 (from 7F00h); +1 and +3 read/write: data at the latched address. See [Ethernet](#ethernet). |
+| DS12C887 RTC | `$0870` | `A0` and `WR#` through U18 make `AS` and `/CS` | +0 write: the register index; +1 read/write: that register. See [Real-time clock](#real-time-clock). |
 
 `ext_a[3]` is spare.
 
@@ -338,7 +339,7 @@ each through a jumper that can take it off the line.
 | Z85C80 SCSI `IRQ` | active high | through a 74HC05 open-drain inverter |
 | 82077AA `INT` | active high | through a 74HC05 open-drain inverter, with a pull-down at its input |
 | ENC424J600 `/INT` | active low, push-pull; the pin doubles as the `SPISEL` strap, pulled down 100k | through a 74LVC1G07 open-drain buffer |
-| the slot's `/IRQ` | open collector from the card | through an SS14 Schottky, anode on the node |
+| the slot's `/IRQ`, shared with the DS12C887's `/IRQ` | open collector from the card; open drain from the RTC | through an SS14 Schottky, anode on the node |
 
 * The node has its own pull-up to 3.3V, so it goes straight to the existing
   pin 19 (`ext_irq_n`) with no level shifter.
@@ -525,7 +526,7 @@ therefore share them, with **no new pins**:
 * The control register's stereo bit sends the SIDs to separate channels;
   pin 51 low mutes the onboard speaker meanwhile.
 
-**Not on the 65-16 (rev A).** For development, a PCM5102A breakout module
+**Not on the 65-16.** For development, a PCM5102A breakout module
 can be wired to the board instead. The three lines already reach the Tang
 Nano's socket on the carrier as named nets that go nowhere, so wires
 soldered to U3's pads (on the underside) are all it takes:
@@ -609,7 +610,7 @@ side:
 | 42-49 | `D7`-`D0`, the Apple order |
 | 2-5 | `A0`-`A3` |
 | 41 `/DEVSEL` | decoder select 6, `$0860` |
-| 1 `/IOSEL` | decoder select 7, `$0870` |
+| 1 `/IOSEL` | decoder select 7, `$0870`, which is also the real-time clock's: a card must not answer it |
 | 18 `R/W` | `WR#`: high for reads and idle, low during a write. True 6502 timing would need `R/W` held either side of a clock, which the two strobes cannot give without a latch and a delayed `PHI0`; at this bus speed no 6500-family part would keep up anyway |
 | 35, 36 | the raw `RD#` and `WR#`, on the `COLORREF` and `7M` positions, which no I/O card uses |
 | 31 `/RES` | `RES#` |
@@ -624,49 +625,64 @@ pin is spare for it, and DDC data (52), the last spare, is the only candidate.
 
 ## Real-time clock
 
-**Open.** The carrier has no clock that keeps time while the power is off.
-Two routes, which work together:
+**Drawn (rev B):** a battery-backed clock on the carrier's external bus, on the
+RTC sheet. OS16 can also take the time from the network:
 
 * **NTP**, once the ENC424J600 driver and UDP work. OS16 asks a time server
-  at boot and from time to time, and the tick timer's TICKS carries the time
-  in between. Before the network is up, or offline, the time is unknown, and
-  so are the dates of files written meanwhile.
-* **A battery-backed RTC on the external bus, through the slot.** Selects 6
-  and 7 go only to the slot (`/DEVSEL` at `$0860`, `/IOSEL` at `$0870`), and
-  the slot carries `D0`-`D7`, `A0`-`A3`, the raw `RD#` and `WR#` (pins 35 and
-  36), `/RES`, `/IRQ` and +5V. A small card in another SlotBoard slot can
-  therefore carry an RTC, with no FPGA pins and no change to the 65-16.
+  at boot and from time to time, sets the clock chip from it, and the tick
+  timer's TICKS carries the time in between.
+* **The clock chip** keeps the time while the power is off, and gives the
+  time at boot before the network is up, or offline.
 
-The part: a **DS12C887**, the MC146818-compatible clock of the PC AT: 5V,
-its crystal and lithium cell inside the package.
+The part: U17, a **DS12C887**, the MC146818-compatible clock of the PC AT: 5V,
+the MC146818's registers and 113 bytes of RAM, its lithium cell and crystal
+sealed in the 24-pin module, about 10 years without power. It goes in a
+socket, so a module whose cell has run down can be replaced.
 
-* **Intel bus mode** (`MOT` to ground). Its address and data share one bus:
-  the register index is latched by `AS`, then data moves with `RD#` or `WR#`
-  while `/CS` is low.
-* **The card's glue**, a couple of gates, as the PC AT's ports 70h and 71h
-  did it: `AS` pulses during a write to `$0860` (A0 = 0, select 6, `WR#`),
-  and `/CS` is low only for `$0861` (A0 = 1), so the index write doesn't
-  also write data:
+* **Intel bus mode** (`MOT` to ground). The register index and the data share
+  `AD0`-`AD7`: `AS` latches the index on its falling edge, then data moves
+  with `RD#` or `WR#` while `/CS` is low. A cycle without `/CS` latches an
+  index and accesses nothing.
+* **Two ports in select 7**, as the PC AT's ports 70h and 71h:
 
   ```
           lda #reg
-          sta $0860               ; the register index (AS)
-          lda $0861               ; its data (/CS with RD#)
+          sta $0870               ; the register index (AS)
+          lda $0871               ; its data (/CS with RD#)
   ```
-* **Interrupt:** its open-drain `/IRQ` (alarm, periodic, update-ended) to the
-  slot's `/IRQ`, which reaches the shared interrupt node through the
-  carrier's SS14.
-* **Check** the bus timing against the DS12C887 datasheet:
-  * the read strobe (238 ns here) against its minimum
-  * data valid after `RD#` falls
-  * the index's setup and hold around `AS` falling. The index is on the bus
-    from the start of the write cycle until 40 ns after `WR#` rises.
-  * the time from the index write to the data access, about 480 ns here
+* **The glue** is U18, an SN74LV27A (three 3-input NORs):
+  * `AS` = NOR(`/SEL7`, `WR#`, `A0`): high during a write to `$0870`. It falls
+    as `WR#` rises, and latches the index.
+  * `/CS` = NOR(NOR(`/SEL7`, `A0#`)): low for `$0871`, read or write.
+    `A0#` is `A0` inverted by U8, the Ethernet glue's.
+  * It must be the **SN74LV27A, not a 74HCT27**. `/CS` goes through two gates
+    and must fall 20 ns before the strobe. The LV27A takes at most 5.9 ns a
+    gate at 5V (7 ns hot), against about 25 ns for an HCT27. Its inputs need
+    CMOS levels at 5V, and all four are driven by 5V HCT outputs (U5, U6, U8).
+* **Interrupt:** its open-drain `/IRQ` joins the slot's `/IRQ`, into the
+  shared interrupt node through the SS14 (D4). It interrupts only for the
+  alarm, the periodic rate or the end of an update, when enabled.
+* **Reset:** `/RESET` takes `/RES`. A reset of 5 ms or more clears the
+  interrupt enables and flags; the time and the RAM are untouched. OS16 should
+  still clear them (register B) before it enables interrupts, as a shorter
+  reset may not.
+* **Bus timing,** checked against the DS12887/DS12C887 datasheet at 25.2 MHz
+  (T = 119 ns, H = 40 ns; 40.5 MHz is no tighter):
 
-  It is the class of part made for the PC AT's 8 MHz bus, which ours is
-  modelled on, so it should fit.
-* **The final board** puts the same chip on its own bus, with a select of its
-  own.
+  | Requirement | Here |
+  |---|---|
+  | `/CS` setup before `RD#`/`WR#`, 20 ns | `/SEL7` falls H + the '138 (at most about 83 ns) into the cycle, `/CS` two gates later; the strobe falls at T plus the HCT541: about 65 ns typical, 20 ns worst case |
+  | Index valid before `AS` falls, 30 ns; `AS` high, 60 ns | the index is on the bus from the cycle's start; `AS` is high for the 238 ns strobe |
+  | Index hold after `AS` falls, 10 ns | `AS` falls within 9 ns of `WR#` rising; the data stays until a clock after the enable rises, 80 ns after `WR#`: about 45 ns or more |
+  | Strobe low, 125 ns; high, 150 ns; cycle, 385 ns | 238 ns; at least 278 ns; at least 516 ns |
+  | Read data valid, 120 ns after `RD#` falls | read at the end of the 238 ns strobe |
+  | Write data setup, 100 ns; hold, 0 | valid from the cycle's start; held 80 ns |
+  | `AS` falling to the next strobe, 40 ns | the data access starts at least 280 ns later |
+  | Read data held up to 80 ns after `RD#` rises | the 74LVC245 turns towards the cards for 40 ns of that, the same brief overlap as the other chips ([Voltage levels](#voltage-levels)); the next cycle starts 120 ns or more later |
+
+* **The slot** keeps select 6 (`/DEVSEL`, `$0860`) to itself. Select 7 is
+  also the slot's `/IOSEL`, so a card must not answer it.
+* **The final board** puts the same chip on its bus.
 
 Simpler 4-bit parts (Epson RTC-72421, OKI MSM6242) need no glue, but they
 are slower on the bus and need a separate battery and crystal.
@@ -1071,6 +1087,13 @@ repository's `gerbers/`).
       `/RES`, `/IRQ` through an SS14, `INT IN` and `DMA IN` pulled up, +5V,
       +12V and -12V.
 
+### Real-time clock
+
+- [x] A DS12C887 in a 24-pin socket, `MOT` to ground (Intel mode), on
+      `D0`-`D7`, `RD#`, `WR#` and `/RES`; `/IRQ` to the slot's `/IRQ`;
+      `SQW` and `/RCLR` open ([Real-time clock](#real-time-clock)).
+- [x] An SN74LV27A: `AS` for a write to `$0870`, `/CS` for `$0871`.
+
 ### Test and bring-up
 
 - [x] A 40-pin logic analyser header: pins 2-9 `D0`-`D7`, 11-14 `A0`-`A3`,
@@ -1085,7 +1108,7 @@ repository's `gerbers/`).
 
 ### Stereo audio (optional)
 
-Not on the 65-16 (rev A): a breakout module can be wired to U3 for
+Not on the 65-16: a breakout module can be wired to U3 for
 development ([Stereo on the carrier](#stereo-on-the-carrier)). A
 requirement for the final board.
 
@@ -1125,7 +1148,8 @@ requirement for the final board.
    * ~~soft power and the power LED at `$0480`~~ (done)
    * ~~an Ethernet DMA channel~~ (done: DMA channel 2, `$0420`)
 5. ~~Lay out the 65-16 board from the schematic~~ (done: routed, Gerbers in
-   the 65-16 repository). Order it, assemble it and bring it up.
+   the 65-16 repository; rev B adds the real-time clock). Order it, assemble
+   it and bring it up.
 6. Software: the ENC424J600 driver, OS16's shutdown through `$0482` and its
    use of the power key, and em16 models of both if software wants them
    before the board.
@@ -1136,6 +1160,7 @@ requirement for the final board.
    connector go with the Tang Nano. That means the PCM5102A with a line-out
    jack, and an amplifier for a speaker. And a battery-backed real-time
    clock on its bus ([Real-time clock](#real-time-clock)).
-9. A real-time clock card for the slot: a DS12C887 at select 6 (`$0860`),
-   once its bus timing is checked ([Real-time clock](#real-time-clock)).
-   NTP in OS16 once Ethernet works.
+9. Software for the real-time clock: an OS16 driver for the DS12C887 at
+   `$0870` (the time at boot, setting it, its interrupts cleared before
+   interrupts are enabled), NTP once Ethernet works, and an em16 model if
+   wanted ([Real-time clock](#real-time-clock)).
