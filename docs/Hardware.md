@@ -107,7 +107,7 @@ the floppy drives. No 5V signal may reach an FPGA pin directly.
 | `ext_d[7:0]` | both ways | 74LVC245A at 3.3V (SN74LVC245AN is DIP-20) | Its inputs are 5V tolerant, and its 3.3V output meets the 5V chips' input high level (2.0-2.2V). `DIR` comes from `RD#` and `/OE` from the select enable, both on the FPGA side. Neither needs a pin. |
 | `ext_a[3:0]`, `RD#`, `WR#`, `RES#`, `TC` | FPGA to carrier | 74HCT541 at 5V (74AHCT541 for less delay) | HCT inputs accept 3.3V, and the outputs swing a full 5V. The eight signals fill it. It also protects the FPGA pins. |
 | Select code and enable | FPGA to carrier | 74HCT138 at 5V | It shifts and decodes in one part. |
-| `DRQ0`, `DRQ1` | carrier to FPGA | 74LVC125A at 3.3V | Inputs are 5V tolerant. |
+| `DRQ0`, `DRQ1` | carrier to FPGA | 74AHC125 at 3.3V (SN74AHC125N) | Its inputs take up to 5.5V whatever its supply. At 3.3V a high needs 2.31V, which the chips' CMOS outputs, lightly loaded by the pull-downs, give easily. The 74LVC125A was the first choice, but it has no DIP package. |
 | `adb_sense` | carrier to FPGA | A 10k/15k divider with a BAT54S clamp to 3.3V (Drawn) | 3.0V at a 5V high, so the clamp never conducts. A 74LVC1G17, whose Schmitt input suits the slow edges of a pulled-up ADB cable, is the alternative if they prove a problem; the pin can also take `HYSTERESIS=HIGH`. See [ADB](#adb). |
 | `adb_drive` | FPGA to bus | 2N3904 | See [ADB](#adb). |
 | `ext_irq_n` | carrier to FPGA | Open-drain node pulled up to 3.3V | See [Interrupts](#interrupts). It needs no shifter. |
@@ -704,7 +704,7 @@ controller is `rtl/sd_spi.v` at `$02C0`; its registers are in
 
 **D1 and D2 are shared with DMA, and that is safe with a card in the slot.**
 A card in SPI mode neither drives nor reads its D1 and D2, so `TC` (an
-output) and `DRQ1` (driven by the carrier's 74LVC125A) only see the card's
+output) and `DRQ1` (driven by the carrier's 74AHC125) only see the card's
 input load and the board's 10k pull-ups. Before SPI mode a card is in SD
 mode, where it drives its data lines only in reply to a data command. The
 first command it gets is CMD0 with chip select low, which puts it in SPI
@@ -986,7 +986,7 @@ repository's `gerbers/`).
       from the select enable, both on the FPGA side.
 - [x] A 74HCT541 at 5V on the FPGA outputs: `ext_a[3:0]`, `RD#`, `WR#`,
       `RES#` and `TC`.
-- [x] A 74LVC125A at 3.3V on the inputs to the FPGA: `DRQ0` and `DRQ1`.
+- [x] A 74AHC125 at 3.3V on the inputs to the FPGA: `DRQ0` and `DRQ1`.
 - [x] A 74HCT04: `TC` to the 53C80 `/EOP`, `RES#` to the 82077AA `RESET`,
       `DENSEL` for 3.5" drives, and `A0#` for the ENC424J600 glue.
 - [x] On the FPGA side of the buffers: pull-ups to 3.3V on `RD#`, `WR#` and
@@ -1012,7 +1012,7 @@ repository's `gerbers/`).
       `/IRQ`.
 - [x] A 4k7 pull-up to 3.3V on the interrupt node, which goes to pin 19.
 - [x] `DRQ0` (53C80) and `DRQ1` (82077AA) to pins 79 and 80, through the
-      LVC buffer.
+      AHC buffer.
 - [x] Pull-downs on both `DRQ` inputs to the buffer, on the 5V side: the
       82077AA tristates `DRQ` while its DMA gate is off ([DMA.md](DMA.md)).
 - [x] `TC` from pin 85 to the 82077AA `TC`, and through the 74HCT04 to the
