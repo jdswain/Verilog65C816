@@ -1,5 +1,13 @@
 //============================================================================
-// cpu_65c816.v -- WDC 65C816 compatible CPU core
+// cpu_65c816.v -- WDC 65C832 (and so 65C816) compatible CPU core
+//
+// A 65C832 (docs/65C832.md): the 65C816, and a native mode with a 32-bit
+// accumulator and 32-bit index registers, chosen by the hidden bits E16 and
+// E8 (E8 is the 65C816's E). XCE exchanges C and E8 as on the 65C816; XFE
+// ($42 $FB) exchanges C and E8, V and E16. WDM ($42) is a prefix: with the
+// byte after it, one instruction of the extension (MUL, UML, DIV, UDV, the
+// multi-bit shifts and rotates, BSW). Parameters: C832 = 0 leaves E16 at 1
+// (a 65C816), XOPS = 0 leaves the extension out.
 //
 // Goals: functional compatibility, NOT cycle accuracy. Every bus cycle does
 // useful work: there are no dummy/phantom reads or writes (unlike the real
@@ -48,14 +56,18 @@
 //   - VPA/VDA/VPB/MLB status outputs and ABORT are not provided.
 //
 // Extension: banked direct page and stack (docs/BankedDP.md). WDM $B1 sets
-// the mode, WDM $B0 clears it (reset clears it; other WDMs stay no-ops). In
-// native mode with the mode set, D is a page number: the direct page is at
-// {D, $00} and the stack at {DH, S}, so both leave bank 0 together.
+// the mode, WDM $B0 clears it (reset clears it; a WDM with a byte the
+// extension does not use is a 2-byte no-op). In native mode with the mode
+// set, D is a page number: the direct page is at {D, $00} and the stack at
+// {DH, S}, so both leave bank 0 together.
 //============================================================================
 
 `default_nettype none
 
-module cpu_65c816 (
+module cpu_65c816 #(
+    parameter C832 = 1,         // the 65C832 native mode (E16)
+    parameter XOPS = 1          // MUL/UML/DIV/UDV, shifts by n, BSW
+) (
     input  wire        clk,
     input  wire        rst_n,
     // bus
@@ -86,19 +98,42 @@ module cpu_65c816 (
     //------------------------------------------------------------------
     // Architectural registers
     //------------------------------------------------------------------
-    reg [15:0] A;        // C accumulator (B = A[15:8])
-    reg [15:0] X, Y;     // index registers (high byte forced 0 when x=1)
+    reg [31:0] A;        // accumulator (B = A[15:8]; bits above its width kept)
+    reg [31:0] X, Y;     // index registers (0 above their width)
     reg [15:0] S;        // stack pointer (high byte forced 01 when E=1)
     reg [15:0] D;        // direct page register
     reg [15:0] PC;
     reg [7:0]  DBR, PBR;
     reg fC, fZ, fI, fD, fX, fM, fV, fN, fE;
+    reg fE16;            // E16: 0 = 65C832 native (fE is E8)
     reg xb;              // banked direct page and stack (WDM $B1 / $B0)
 
-    wire m16 = ~fE & ~fM;     // 16-bit accumulator/memory
-    wire x16 = ~fE & ~fX;     // 16-bit index registers
+    // the mode, and the registers' widths (W8, W16, W32)
+    localparam [1:0] W8 = 2'd0, W16 = 2'd1, W32 = 2'd2;
+    wire emu  = fE & fE16;                  // 6502 emulation
+    wire n832 = (C832 != 0) & ~fE16;        // 65C832 native
+    wire a32  = n832 & fE & ~fM;            // 32-bit accumulator/memory
+    wire m16  = ~emu & ~fM & ~a32;          // 16-bit accumulator/memory
+    wire x32  = n832 & ~fX;                 // 32-bit index registers
+    wire x16  = fE16 & ~fE & ~fX;           // 16-bit (65C816 native only)
+    wire [1:0] aw = a32 ? W32 : (m16 ? W16 : W8);
+    wire [1:0] xw = x32 ? W32 : (x16 ? W16 : W8);
+    wire cw32 = n832 & fE;                  // A's wide width is 32 (MVN's count)
 
-    assign e_flag  = fE;
+    function [31:0] wmask(input [1:0] w);
+        wmask = (w == W32) ? 32'hFFFFFFFF : (w == W16) ? 32'h0000FFFF : 32'h000000FF;
+    endfunction
+    function topb(input [31:0] v, input [1:0] w);     // the sign bit
+        topb = (w == W32) ? v[31] : (w == W16) ? v[15] : v[7];
+    endfunction
+    function nextb(input [31:0] v, input [1:0] w);    // the one below it
+        nextb = (w == W32) ? v[30] : (w == W16) ? v[14] : v[6];
+    endfunction
+    function zerow(input [31:0] v, input [1:0] w);
+        zerow = ((v & wmask(w)) == 32'h0);
+    endfunction
+
+    assign e_flag  = emu;
     assign m_flag  = fM;
     assign x_flag  = fX;
 
@@ -111,12 +146,12 @@ module cpu_65c816 (
         S_PTRL  = 5'd4,   // indirect pointer low
         S_PTRH  = 5'd5,   // indirect pointer high
         S_PTRB  = 5'd6,   // indirect pointer bank
-        S_RDL   = 5'd7,   // data read low  (execute folds here for 8-bit)
-        S_RDH   = 5'd8,   // data read high (execute folds here for 16-bit)
+        S_RDL   = 5'd7,   // data read, the low byte
+        S_RDH   = 5'd8,   // data read, the next bytes (rb)
         S_WRL   = 5'd9,   // store write low
-        S_WRH   = 5'd10,  // store write high
+        S_WRH   = 5'd10,  // store write, the next bytes (rb)
         S_WBL   = 5'd11,  // RMW write-back low
-        S_WBH   = 5'd12,  // RMW write-back high
+        S_WBH   = 5'd12,  // RMW write-back, the next bytes (rb)
         S_PUSH  = 5'd13,  // stack push (multi-byte)
         S_PULL  = 5'd14,  // stack pull (multi-byte)
         S_VECL  = 5'd15,  // vector fetch low
@@ -125,7 +160,9 @@ module cpu_65c816 (
         S_MVW   = 5'd18,  // block move write
         S_WAI   = 5'd19,  // waiting for interrupt
         S_STP   = 5'd20,  // stopped
-        S_IMP   = 5'd21;  // push / WAI / STP setup
+        S_IMP   = 5'd21,  // push / WAI / STP setup
+        S_XOP   = 5'd22,  // the opcode after a WDM prefix
+        S_MD    = 5'd23;  // multiply / divide (md_ph)
 
     reg [4:0] state;
     assign stopped = (state == S_STP);
@@ -150,18 +187,21 @@ module cpu_65c816 (
         OP_CPX=5'd10, OP_CPY=5'd11, OP_STA=5'd12, OP_STX=5'd13, OP_STY=5'd14,
         OP_STZ=5'd15, OP_ASL=5'd16, OP_ROL=5'd17, OP_LSR=5'd18, OP_ROR=5'd19,
         OP_INC=5'd20, OP_DEC=5'd21, OP_TSB=5'd22, OP_TRB=5'd23, OP_REP=5'd24,
-        OP_SEP=5'd25, OP_NOP=5'd26;
+        OP_SEP=5'd25, OP_NOP=5'd26,
+        // the extension's, after the WDM prefix
+        OP_MUL=5'd27, OP_UML=5'd28, OP_DIV=5'd29, OP_UDV=5'd30, OP_SHF=5'd31;
 
     //------------------------------------------------------------------
     // Working registers
     //------------------------------------------------------------------
     reg [7:0]  IR;
+    reg        IRx;           // IR followed a WDM prefix
     reg [7:0]  tlo, tmid;     // operand / pointer byte accumulators
     reg [15:0] tptr;          // indirect pointer address
     reg [7:0]  ptr_bank;      // bank for pointer fetches
     reg [23:0] taddr;         // effective data address
     reg        wrap16;        // effective addr +1 wraps within bank (dp/stack)
-    reg [15:0] tdata;         // RMW result / block-move byte
+    reg [31:0] tdata;         // RMW result / block-move byte / pulled bytes
     reg [31:0] push_q;        // push queue, MSB first
     reg [2:0]  push_n;
     reg        stk16;         // new 16-bit stack op (PEA/PEI/PER/PHD/PLD):
@@ -169,7 +209,9 @@ module cpu_65c816 (
     reg [1:0]  post_push;     // routing after the last push
     reg [1:0]  pull_idx;
     reg [15:0] vec;           // interrupt vector address (bank 0)
-    reg [23:0] taddr_alt;     // the other byte's address of a 16-bit access
+    reg [23:0] taddr_alt;     // a wide access's first address (RMW write-back)
+    reg [1:0]  rb;            // the byte of a wide access (S_RDH/S_WRH/S_WBH)
+    reg [23:0] mv_s, mv_d;    // a block move's source and destination
     reg [23:0] pa;            // the next pull's address
     // Deferred execute: a read-class instruction's operand is latched as it
     // arrives (xm) and executed in the next cycle, the following opcode fetch,
@@ -177,8 +219,24 @@ module cpu_65c816 (
     // in the fetch cycle, or an interrupt, waits a cycle for it.
     reg        xp;            // an execute is pending, of xm
     reg        lp;            // an implied opcode's execute is pending (IR)
-    reg [15:0] xm;
+    reg [31:0] xm;
     reg        snap_late;     // the ABORT snapshot's registers, a cycle late
+
+    // The multiply / divide unit (S_MD): a shift-and-add multiply and a
+    // restoring divide of A by the operand (xm), a bit a cycle, sharing one
+    // adder. Signed operands: MUL corrects the high half after an unsigned
+    // multiply; DIV divides the magnitudes and then rounds the quotient down.
+    localparam [3:0] P_INIT = 4'd0, P_NEGA = 4'd1, P_NEGB = 4'd2, P_LOOP = 4'd3,
+                     P_FIX1 = 4'd4, P_FIX2 = 4'd5, P_FIXQ = 4'd6, P_FIXR = 4'd7,
+                     P_DONE = 4'd8;
+    reg [3:0]  md_ph;
+    reg [32:0] md_h;          // the product's high half / the remainder
+    reg [31:0] md_l;          // the multiplier, then the low half / the quotient
+    reg [31:0] md_a, md_b;    // A's operand and the memory's, at A's width
+    reg [5:0]  md_n;          // steps to go
+    reg        md_sx, md_sy;  // their signs (signed operations)
+    reg        md_sg, md_dv;  // signed; a divide
+    reg        md_ov;         // DIV: the most negative number by -1
 
     // Instruction queue. Opcode and operand bytes come from here, never
     // from the bus: a fetcher fills it a word at a time in the cycles the
@@ -193,7 +251,7 @@ module cpu_65c816 (
     reg        fbusy;         // a fetch holds the bus until rdy
     reg        fdrop;         // ... and its bytes are stale (a jump since)
     // per-cycle flags from the state machine to the queue logic
-    reg [1:0]  take;          // bytes taken from the head
+    reg [2:0]  take;          // bytes taken from the head
     reg        jmp;           // PC written out of sequence: empty the queue
     reg [15:0] jpc;
     reg [7:0]  jbank;         // and the bank to fetch from
@@ -217,10 +275,11 @@ module cpu_65c816 (
     // pushed (so RTI retries the instruction).
     //------------------------------------------------------------------
     reg        abort_pend;       // an abort is pending for the running instr
-    reg [15:0] sA, sX, sY, sS, sD, sPC;
+    reg [31:0] sA, sX, sY;
+    reg [15:0] sS, sD, sPC;
     reg [7:0]  sDBR, sPBR;
     reg        sxb;
-    reg        sfN, sfV, sfM, sfX, sfD, sfI, sfZ, sfC, sfE;
+    reg        sfN, sfV, sfM, sfX, sfD, sfI, sfZ, sfC, sfE, sfE16;
 
     // ABORT may be recognized during any instruction-execution state, but not
     // during an interrupt/abort entry (push + vector fetch) or while halted.
@@ -499,6 +558,33 @@ module cpu_65c816 (
         endcase
     end
 
+    // The opcode after a WDM prefix (S_XOP). An ADC, AND, CMP or EOR opcode
+    // is MUL, UML, DIV or UDV in that addressing mode; $0A, $2A, $4A, $6A
+    // and $8A take a count (ASL, ROL, LSR, ROR, ASR #n); anything else is
+    // implied (lp): XFE, BSW, the banked mode's $B0/$B1, or a no-op.
+    reg [12:0] xdec_in;
+    reg [1:0]  xlen_in;
+    reg        ximp;
+    always @* begin
+        xdec_in = {MD_NON, CL_SPC, OP_NOP}; xlen_in = len_in; ximp = 1'b1;
+        if (XOPS != 0) begin
+            if (dec_in[7:5] == CL_RD)
+                case (dec_in[4:0])
+                OP_ADC: begin xdec_in = {dec_in[12:5], OP_MUL}; ximp = 1'b0; end
+                OP_AND: begin xdec_in = {dec_in[12:5], OP_UML}; ximp = 1'b0; end
+                OP_CMP: begin xdec_in = {dec_in[12:5], OP_DIV}; ximp = 1'b0; end
+                OP_EOR: begin xdec_in = {dec_in[12:5], OP_UDV}; ximp = 1'b0; end
+                default: ;
+                endcase
+            case (qb)
+            8'h0A, 8'h2A, 8'h4A, 8'h6A, 8'h8A: begin
+                xdec_in = {MD_IMM, CL_RD, OP_SHF}; xlen_in = 2'd1; ximp = 1'b0;
+            end
+            default: ;
+            endcase
+        end
+    end
+
     // The opcode being fetched: implied (executed in the next cycle, lp),
     // a push, WAI or STP (S_IMP), or a pull (S_PULL).
     reg fetch_local, fetch_setup;
@@ -525,36 +611,38 @@ module cpu_65c816 (
     // operand width for reads/RMW; stores have their own
     wire op_xwide = (d_op==OP_LDX)||(d_op==OP_LDY)||(d_op==OP_CPX)||
                     (d_op==OP_CPY)||(d_op==OP_STX)||(d_op==OP_STY);
-    wire op_8bit  = (d_op==OP_REP)||(d_op==OP_SEP)||(d_op==OP_NOP);
-    wire rd16 = op_8bit ? 1'b0 : (op_xwide ? x16 : m16);   // read / RMW width
-    wire st16 = op_xwide ? x16 : m16;                      // store width
+    wire op_8bit  = (d_op==OP_REP)||(d_op==OP_SEP)||(d_op==OP_NOP)||(d_op==OP_SHF);
+    wire [1:0] rw = op_8bit ? W8 : (op_xwide ? xw : aw);   // read / RMW width
+    wire [1:0] sw = op_xwide ? xw : aw;                    // store width
+    // the last byte of a wide access (rb)
+    wire [1:0] rlast = (rw == W32) ? 2'd3 : {1'b0, rw == W16};
+    wire [1:0] slast = (sw == W32) ? 2'd3 : {1'b0, sw == W16};
+    wire d_md = (d_op == OP_MUL) | (d_op == OP_UML) | (d_op == OP_DIV) | (d_op == OP_UDV);
 
     // store value
-    reg [15:0] stval;
+    reg [31:0] stval;
     always @* begin
         case (d_op)
         OP_STA:  stval = A;
         OP_STX:  stval = X;
         OP_STY:  stval = Y;
-        default: stval = 16'h0000;   // STZ
+        default: stval = 32'h0;      // STZ
         endcase
     end
 
-    // width-masked register views
-    wire [15:0] av = m16 ? A : {8'h00, A[7:0]};
-    wire [15:0] xv = X;
-    wire [15:0] yv = Y;
+    // A at its width (X and Y hold nothing above theirs)
+    wire [31:0] av = A & wmask(aw);
 
     // direct-page page-wrap active: emulation mode with DL = $00. Only the
     // base offset (dp + index) wraps within the page; the +1/+2 used to fetch
     // the upper bytes of a word/pointer are plain 16-bit increments and may
     // cross the page boundary.
-    wire dpw = fE & (D[7:0] == 8'h00);
+    wire dpw = emu & (D[7:0] == 8'h00);
 
     // banked mode (native only): the direct page is at {D, $00} and the
     // stack at {DH, S}. dbase is the direct page's offset in its bank,
     // dbank the bank of the direct page, the stack and their pointers.
-    wire        bk    = xb & ~fE;
+    wire        bk    = xb & ~emu;
     wire [15:0] dbase = bk ? {D[7:0], 8'h00} : D;
     wire [7:0]  dbank = bk ? D[15:8] : 8'h00;
 
@@ -564,89 +652,95 @@ module cpu_65c816 (
     // registers a cycle ahead, so no adder sits in front of the memory.
     wire [23:0] taddr1   = wrap16 ? {taddr[23:16], taddr[15:0] + 16'd1}
                                   : taddr + 24'd1;
-    wire [23:0] sp_push  = (fE & ~stk16) ? {16'h0001, S[7:0]} : {dbank, S};
+    wire [23:0] sp_push  = (emu & ~stk16) ? {16'h0001, S[7:0]} : {dbank, S};
     wire [15:0] pcn      = PC + 16'd1;
-    // S_OPS: the operand bytes and the address past the instruction
-    wire [1:0]  olen     = d_len + {1'b0, (d_mode == MD_IMM) & rd16};
-    wire [15:0] pce      = PC + {14'd0, olen};
-    wire [7:0]  b1 = q[7:0], b2 = q[15:8], b3 = q[23:16];
+    // S_OPS: the operand bytes and the address past the instruction (an
+    // immediate is as wide as its register: 1, 2 or 4 bytes)
+    wire [2:0]  olen     = {1'b0, d_len} + ((d_mode != MD_IMM) ? 3'd0 :
+                           (rw == W32) ? 3'd3 : (rw == W16) ? 3'd1 : 3'd0);
+    wire [15:0] pce      = PC + {13'd0, olen};
+    wire [7:0]  b1 = q[7:0], b2 = q[15:8], b3 = q[23:16], b4 = q[31:24];
 
     // P register byte (brkbit: value of bit4 in emulation mode)
     function [7:0] pbyte(input brkbit);
-        pbyte = {fN, fV, fE ? 1'b1 : fM, fE ? brkbit : fX, fD, fI, fZ, fC};
+        pbyte = {fN, fV, emu ? 1'b1 : fM, emu ? brkbit : fX, fD, fI, fZ, fC};
     endfunction
 
     //------------------------------------------------------------------
     // Arithmetic helpers
     //------------------------------------------------------------------
-    // decimal add: 4-nibble BCD chain. Returns {top, carry, sum[15:0]} where
-    // `top` is bit 7 (8-bit) / bit 15 (16-bit) of the result BEFORE the final
-    // high-nibble correction -- the 65C816 derives N and V from that point.
-    function [17:0] dadd(input [15:0] a, input [15:0] b, input cin, input w);
-        reg [4:0] n0, n1, n2, n3;
-        reg c0, c1, c2, c3, top;
+    // decimal add: a BCD chain of 2, 4 or 8 digits. Returns {top, carry,
+    // sum[31:0]} where `top` is the result's top bit BEFORE the final
+    // high-nibble correction -- the 65C816 derives V from that point.
+    function [33:0] dadd(input [31:0] a, input [31:0] b, input cin, input [1:0] w);
+        reg [4:0] n;
+        reg [31:0] s;
+        reg c, cw, top;
+        integer i;
         begin
-            n0 = a[3:0]  + b[3:0]  + cin; c0 = (n0 > 5'd9); if (c0) n0 = n0 + 5'd6;
-            n1 = a[7:4]  + b[7:4]  + c0;
-            if (!w) top = n1[3];
-            c1 = (n1 > 5'd9); if (c1) n1 = n1 + 5'd6;
-            n2 = a[11:8] + b[11:8] + c1;  c2 = (n2 > 5'd9); if (c2) n2 = n2 + 5'd6;
-            n3 = a[15:12]+ b[15:12]+ c2;
-            if (w) top = n3[3];
-            c3 = (n3 > 5'd9); if (c3) n3 = n3 + 5'd6;
-            dadd = w ? {top, c3, n3[3:0], n2[3:0], n1[3:0], n0[3:0]}
-                     : {top, c1, 8'h00,            n1[3:0], n0[3:0]};
+            c = cin; cw = 1'b0; top = 1'b0; s = 32'h0;
+            for (i = 0; i < 8; i = i + 1) begin
+                n = {1'b0, a[4*i +: 4]} + {1'b0, b[4*i +: 4]} + {4'd0, c};
+                if ((i == 1 && w == W8) || (i == 3 && w == W16) || (i == 7 && w == W32))
+                    top = n[3];
+                c = (n > 5'd9); if (c) n = n + 5'd6;
+                s[4*i +: 4] = n[3:0];
+                if ((i == 1 && w == W8) || (i == 3 && w == W16) || (i == 7 && w == W32))
+                    cw = c;
+            end
+            dadd = {top, cw, s & wmask(w)};
         end
     endfunction
 
-    // decimal subtract: a - b, cin = inverted borrow; {carry, diff[15:0]}
-    function [16:0] dsub(input [15:0] a, input [15:0] b, input cin, input w);
-        reg [4:0] n0, n1, n2, n3;
-        reg c0, c1, c2, c3;
+    // decimal subtract: a - b, cin = inverted borrow; {carry, diff[31:0]}
+    function [32:0] dsub(input [31:0] a, input [31:0] b, input cin, input [1:0] w);
+        reg [4:0] n;
+        reg [31:0] s;
+        reg c, cw;
+        integer i;
         begin
-            n0 = {1'b0, a[3:0]}  + {1'b0, ~b[3:0]}  + cin;
-            c0 = n0[4]; if (!c0) n0 = n0 - 5'd6;
-            n1 = {1'b0, a[7:4]}  + {1'b0, ~b[7:4]}  + c0;
-            c1 = n1[4]; if (!c1) n1 = n1 - 5'd6;
-            n2 = {1'b0, a[11:8]} + {1'b0, ~b[11:8]} + c1;
-            c2 = n2[4]; if (!c2) n2 = n2 - 5'd6;
-            n3 = {1'b0, a[15:12]}+ {1'b0, ~b[15:12]}+ c2;
-            c3 = n3[4]; if (!c3) n3 = n3 - 5'd6;
-            dsub = w ? {c3, n3[3:0], n2[3:0], n1[3:0], n0[3:0]}
-                     : {c1, 8'h00,            n1[3:0], n0[3:0]};
+            c = cin; cw = 1'b0; s = 32'h0;
+            for (i = 0; i < 8; i = i + 1) begin
+                n = {1'b0, a[4*i +: 4]} + {1'b0, ~b[4*i +: 4]} + {4'd0, c};
+                c = n[4]; if (!c) n = n - 5'd6;
+                s[4*i +: 4] = n[3:0];
+                if ((i == 1 && w == W8) || (i == 3 && w == W16) || (i == 7 && w == W32))
+                    cw = c;
+            end
+            dsub = {cw, s & wmask(w)};
         end
+    endfunction
+
+    // a 33-bit sum's carry out of the width
+    function carryw(input [32:0] t, input [1:0] w);
+        carryw = (w == W32) ? t[32] : (w == W16) ? t[16] : t[8];
     endfunction
 
     //------------------------------------------------------------------
     // Register write helpers (set NZ per current width)
     //------------------------------------------------------------------
-    task ld_a(input [15:0] v);
+    // A: the bits above its width kept
+    task ld_a(input [31:0] v);
         begin
-            if (m16) begin
-                A <= v;          fN <= v[15]; fZ <= (v == 16'h0000);
-            end else begin
-                A[7:0] <= v[7:0]; fN <= v[7]; fZ <= (v[7:0] == 8'h00);
-            end
+            case (aw)
+            W32:     A <= v;
+            W16:     A[15:0] <= v[15:0];
+            default: A[7:0] <= v[7:0];
+            endcase
+            fN <= topb(v, aw); fZ <= zerow(v, aw);
         end
     endtask
 
-    task ld_x(input [15:0] v);
+    // X, Y: nothing above their width
+    task ld_x(input [31:0] v);
         begin
-            if (x16) begin
-                X <= v;               fN <= v[15]; fZ <= (v == 16'h0000);
-            end else begin
-                X <= {8'h00, v[7:0]}; fN <= v[7];  fZ <= (v[7:0] == 8'h00);
-            end
+            X <= v & wmask(xw); fN <= topb(v, xw); fZ <= zerow(v, xw);
         end
     endtask
 
-    task ld_y(input [15:0] v);
+    task ld_y(input [31:0] v);
         begin
-            if (x16) begin
-                Y <= v;               fN <= v[15]; fZ <= (v == 16'h0000);
-            end else begin
-                Y <= {8'h00, v[7:0]}; fN <= v[7];  fZ <= (v[7:0] == 8'h00);
-            end
+            Y <= v & wmask(xw); fN <= topb(v, xw); fZ <= zerow(v, xw);
         end
     endtask
 
@@ -655,87 +749,96 @@ module cpu_65c816 (
         begin
             fN <= v[7]; fV <= v[6]; fD <= v[3]; fI <= v[2];
             fZ <= v[1]; fC <= v[0];
-            if (!fE) begin
+            if (!emu) begin
                 fM <= v[5]; fX <= v[4];
-                if (v[4]) begin X[15:8] <= 8'h00; Y[15:8] <= 8'h00; end
+                if (v[4]) begin X[31:8] <= 24'h0; Y[31:8] <= 24'h0; end
             end
         end
     endtask
 
-    // compare: reg - mem, sets NZC
-    task cmp_flags(input [15:0] r, input [15:0] m, input w);
-        reg [16:0] t;
+    // compare: reg - mem, sets NZC (both already at width w)
+    task cmp_flags(input [31:0] r, input [31:0] m, input [1:0] w);
+        reg [32:0] t;
         begin
-            if (w) begin
-                t = {1'b0, r} + {1'b0, ~m} + 17'd1;
-                fC <= t[16]; fN <= t[15]; fZ <= (t[15:0] == 16'h0000);
-            end else begin
-                t = {9'b0, r[7:0]} + {9'b0, ~m[7:0] & 8'hFF} + 17'd1;
-                fC <= t[8]; fN <= t[7]; fZ <= (t[7:0] == 8'h00);
-            end
+            t = {1'b0, r} + {1'b0, ~m & wmask(w)} + 33'd1;
+            fC <= carryw(t, w); fN <= topb(t[31:0], w); fZ <= zerow(t[31:0], w);
         end
     endtask
 
-    task do_adc(input [15:0] m);
-        reg [16:0] t;
-        reg [17:0] da;
+    // ADC / SBC of m (at A's width); decimal at 2, 4 or 8 digits
+    task do_adc(input [31:0] m);
+        reg [32:0] t;
+        reg [33:0] da;
         begin
             if (fD) begin
-                // Decimal: V comes from the pre-correction top bit (da[17]);
+                // Decimal: V comes from the pre-correction top bit (da[33]);
                 // N and Z come from the corrected result; C from the decimal
                 // carry.
-                da = dadd(av, m, fC, m16);
-                if (m16) fV <= ~(A[15] ^ m[15]) & (A[15] ^ da[17]);
-                else     fV <= ~(A[7]  ^ m[7])  & (A[7]  ^ da[17]);
-                fC <= da[16];
-                ld_a(da[15:0]);
-            end else if (m16) begin
-                t = {1'b0, A} + {1'b0, m} + {16'd0, fC};
-                fV <= ~(A[15] ^ m[15]) & (A[15] ^ t[15]);
-                fC <= t[16];
-                ld_a(t[15:0]);
+                da = dadd(av, m, fC, aw);
+                fV <= ~(topb(av, aw) ^ topb(m, aw)) & (topb(av, aw) ^ da[33]);
+                fC <= da[32];
+                ld_a(da[31:0]);
             end else begin
-                t = {9'd0, A[7:0]} + {9'd0, m[7:0]} + {16'd0, fC};
-                fV <= ~(A[7] ^ m[7]) & (A[7] ^ t[7]);
-                fC <= t[8];
-                ld_a(t[15:0]);
+                t = {1'b0, av} + {1'b0, m} + {32'd0, fC};
+                fV <= ~(topb(av, aw) ^ topb(m, aw)) & (topb(av, aw) ^ topb(t[31:0], aw));
+                fC <= carryw(t, aw);
+                ld_a(t[31:0]);
             end
         end
     endtask
 
-    task do_sbc(input [15:0] m);
-        reg [16:0] t;
-        reg [16:0] ds;
+    task do_sbc(input [31:0] m);
+        reg [32:0] t;
+        reg [32:0] ds;
         begin
+            // Decimal: N and Z come from the BCD-corrected result and C
+            // from the (shared) borrow, but V is the binary overflow.
+            t = {1'b0, av} + {1'b0, ~m & wmask(aw)} + {32'd0, fC};
+            fV <= (topb(av, aw) ^ topb(m, aw)) & (topb(av, aw) ^ topb(t[31:0], aw));
             if (fD) begin
-                // Decimal: N and Z come from the BCD-corrected result and C
-                // from the (shared) borrow, but V is the binary overflow.
-                ds = dsub(av, m, fC, m16);
-                if (m16) begin
-                    t = {1'b0, A} + {1'b0, ~m} + {16'd0, fC};
-                    fV <= (A[15] ^ m[15]) & (A[15] ^ t[15]);
-                end else begin
-                    t = {9'd0, A[7:0]} + {9'd0, ~m[7:0] & 8'hFF} + {16'd0, fC};
-                    fV <= (A[7] ^ m[7]) & (A[7] ^ t[7]);
-                end
-                fC <= ds[16];
-                ld_a(ds[15:0]);
-            end else if (m16) begin
-                t = {1'b0, A} + {1'b0, ~m} + {16'd0, fC};
-                fV <= (A[15] ^ m[15]) & (A[15] ^ t[15]);
-                fC <= t[16];
-                ld_a(t[15:0]);
+                ds = dsub(av, m, fC, aw);
+                fC <= ds[32];
+                ld_a(ds[31:0]);
             end else begin
-                t = {9'd0, A[7:0]} + {9'd0, ~m[7:0] & 8'hFF} + {16'd0, fC};
-                fV <= (A[7] ^ m[7]) & (A[7] ^ t[7]);
-                fC <= t[8];
-                ld_a(t[15:0]);
+                fC <= carryw(t, aw);
+                ld_a(t[31:0]);
             end
         end
     endtask
 
-    // read-class execute (called with the full operand, width = rd16)
-    task exec_rd(input [15:0] m);
+    // ASL/ROL/LSR/ROR/ASR #n (IR $0A/$2A/$4A/$6A/$8A) of A, the count k
+    // modulo the width. One rotator, right by kr, on A repeated to fill 32
+    // bits (a left rotation by k is a right one by w - k); the shifts mask
+    // what came round. C: the last bit out, or carried round.
+    task do_shf(input [7:0] m);
+        reg [31:0] rin, rot, lo, hi, res;
+        reg [4:0] k, kr;
+        reg left;
+        begin
+            case (aw)
+            W32:     begin rin = A;              k = m[4:0];         end
+            W16:     begin rin = {2{A[15:0]}};   k = {1'b0, m[3:0]}; end
+            default: begin rin = {4{A[7:0]}};    k = {2'b0, m[2:0]}; end
+            endcase
+            left = (IR == 8'h0A) | (IR == 8'h2A);
+            kr   = left ? ((aw == W32) ? 5'd0 : (aw == W16) ? 5'd16 : 5'd8) - k : k;
+            rot  = (rin >> kr) | (rin << (6'd32 - {1'b0, kr}));
+            lo   = (32'h1 << k) - 32'h1;                               // the low k bits
+            hi   = lo << ((aw == W32) ? 6'd32 - {1'b0, k} :
+                          (aw == W16) ? 6'd16 - {1'b0, k} : 6'd8 - {1'b0, k});  // the top k
+            case (IR)
+            8'h0A:   res = rot & ~lo;                                  // ASL
+            8'h4A:   res = rot & ~hi;                                  // LSR
+            8'h8A:   res = topb(A, aw) ? (rot | hi) : (rot & ~hi);    // ASR
+            default: res = rot;                                        // ROL, ROR
+            endcase
+            if (k != 5'd0) fC <= left ? rot[0] : topb(rot, aw);
+            ld_a(res);
+        end
+    endtask
+
+    // read-class execute (called with the full operand at its width)
+    task exec_rd(input [31:0] m);
         begin
             case (d_op)
             OP_ORA: ld_a(av | m);
@@ -743,23 +846,23 @@ module cpu_65c816 (
             OP_EOR: ld_a(av ^ m);
             OP_ADC: do_adc(m);
             OP_SBC: do_sbc(m);
-            OP_CMP: cmp_flags(av, m, m16);
+            OP_CMP: cmp_flags(av, m, aw);
             OP_LDA: ld_a(m);
             OP_LDX: ld_x(m);
             OP_LDY: ld_y(m);
-            OP_CPX: cmp_flags(xv, m, x16);
-            OP_CPY: cmp_flags(yv, m, x16);
+            OP_CPX: cmp_flags(X, m, xw);
+            OP_CPY: cmp_flags(Y, m, xw);
             OP_BIT: begin
-                fZ <= ((av & m) == 16'h0000);
+                fZ <= ((av & m) == 32'h0);
                 if (IR != 8'h89) begin           // BIT # affects Z only
-                    fN <= m16 ? m[15] : m[7];
-                    fV <= m16 ? m[14] : m[6];
+                    fN <= topb(m, aw);
+                    fV <= nextb(m, aw);
                 end
             end
             OP_REP: set_p(pbyte(fX) & ~m[7:0]);
             OP_SEP: set_p(pbyte(fX) |  m[7:0]);
-            default:                             // OP_NOP: WDM
-                if (m[7:1] == 7'b1011000) xb <= m[0];    // WDM $B0 / $B1
+            OP_SHF: if (XOPS != 0) do_shf(m[7:0]);
+            default: ;
             endcase
         end
     endtask
@@ -769,15 +872,16 @@ module cpu_65c816 (
     // to_a=1: result goes to A; else to tdata for write-back.
     // Everything it reads is an argument: a function called from a
     // continuous assignment is re-evaluated only when its arguments change.
-    function [15:0] rmw_val(input [4:0] op, input [15:0] m, input [15:0] a,
-                            input c, input w);
+    // m and a are at width w (0 above it).
+    function [31:0] rmw_val(input [4:0] op, input [31:0] m, input [31:0] a,
+                            input c, input [1:0] w);
         case (op)
-        OP_ASL: rmw_val = {m[14:0], 1'b0};
-        OP_ROL: rmw_val = {m[14:0], c};
-        OP_LSR: rmw_val = w ? {1'b0, m[15:1]} : {8'h00, 1'b0, m[7:1]};
-        OP_ROR: rmw_val = w ? {c, m[15:1]} : {8'h00, c, m[7:1]};
-        OP_INC: rmw_val = m + 16'd1;
-        OP_DEC: rmw_val = m - 16'd1;
+        OP_ASL: rmw_val = {m[30:0], 1'b0};
+        OP_ROL: rmw_val = {m[30:0], c};
+        OP_LSR: rmw_val = {1'b0, m[31:1]};
+        OP_ROR: rmw_val = {1'b0, m[31:1]} | ({31'd0, c} << ((w == W32) ? 5'd31 : (w == W16) ? 5'd15 : 5'd7));
+        OP_INC: rmw_val = m + 32'd1;
+        OP_DEC: rmw_val = m - 32'd1;
         OP_TSB: rmw_val = m | a;
         OP_TRB: rmw_val = m & ~a;
         default: rmw_val = m;
@@ -785,92 +889,133 @@ module cpu_65c816 (
     endfunction
 
     // A memory RMW's result, from its latched operand: written in S_WBL.
-    wire [15:0] rmw_r = rmw_val(d_op, xm, av, fC, m16);
+    wire [31:0] rmw_r = rmw_val(d_op, xm, av, fC, aw);
 
-    task rmw_core(input [4:0] op, input [15:0] m, input to_a);
-        reg [15:0] r;
+    task rmw_core(input [4:0] op, input [31:0] m, input to_a);
+        reg [31:0] r;
         reg c, setc;
         begin
-            r = rmw_val(op, m, av, fC, m16);
+            r = rmw_val(op, m, av, fC, aw);
             c = fC; setc = 1'b0;
             case (op)
-            OP_ASL, OP_ROL: begin c = m16 ? m[15] : m[7]; setc = 1'b1; end
-            OP_LSR, OP_ROR: begin c = m[0];               setc = 1'b1; end
+            OP_ASL, OP_ROL: begin c = topb(m, aw); setc = 1'b1; end
+            OP_LSR, OP_ROR: begin c = m[0];        setc = 1'b1; end
             default: ;
             endcase
             if (setc) fC <= c;
             if (op == OP_TSB || op == OP_TRB) begin
-                fZ <= ((av & m) == 16'h0000);
+                fZ <= ((av & m) == 32'h0);
             end else begin
-                fN <= m16 ? r[15] : r[7];
-                fZ <= m16 ? (r == 16'h0000) : (r[7:0] == 8'h00);
+                fN <= topb(r, aw);
+                fZ <= zerow(r, aw);
             end
             if (to_a) begin
-                if (m16) A <= r; else A[7:0] <= r[7:0];
+                case (aw)
+                W32:     A <= r;
+                W16:     A[15:0] <= r[15:0];
+                default: A[7:0] <= r[7:0];
+                endcase
             end else begin
                 tdata <= r;
             end
         end
     endtask
 
+    // the high half or remainder into X (MUL/DIV): as much as X holds
+    task wr_x(input [31:0] v);
+        X <= v & wmask(xw);
+    endtask
+
+    // a pull of width w's value, its last byte arriving on the bus now and
+    // the others already in tdata
+    function [31:0] pulled(input [1:0] w);
+        pulled = (w == W32) ? {rdata, tdata[23:0]} :
+                 (w == W16) ? {16'h0, rdata, tdata[7:0]} : {24'h0, rdata};
+    endfunction
+
+    // an index register stepped by MVN (+1) / MVP (-1) at its width
+    function [31:0] mvstep(input [31:0] v, input up, input [1:0] w);
+        mvstep = (up ? v + 32'd1 : v - 32'd1) & wmask(w);
+    endfunction
+
     // An implied opcode, latched in IR at its fetch and executed in the next
     // cycle (lp), overlapped with the following opcode's fetch.
     task exec_imp;
         begin
-            case (IR)
+            case ({IRx, IR})
             // ---- flag ops (1 cycle) ----
-            8'h18: fC <= 1'b0;                       // CLC
-            8'h38: fC <= 1'b1;                       // SEC
-            8'h58: fI <= 1'b0;                       // CLI
-            8'h78: fI <= 1'b1;                       // SEI
-            8'hB8: fV <= 1'b0;                       // CLV
-            8'hD8: fD <= 1'b0;                       // CLD
-            8'hF8: fD <= 1'b1;                       // SED
-            8'hEA: ;                                 // NOP
+            9'h018: fC <= 1'b0;                      // CLC
+            9'h038: fC <= 1'b1;                      // SEC
+            9'h058: fI <= 1'b0;                      // CLI
+            9'h078: fI <= 1'b1;                      // SEI
+            9'h0B8: fV <= 1'b0;                      // CLV
+            9'h0D8: fD <= 1'b0;                      // CLD
+            9'h0F8: fD <= 1'b1;                      // SED
+            9'h0EA: ;                                // NOP
             // ---- accumulator shifts / inc / dec (1 cycle) ----
-            8'h0A: rmw_core(OP_ASL, av, 1'b1);
-            8'h2A: rmw_core(OP_ROL, av, 1'b1);
-            8'h4A: rmw_core(OP_LSR, av, 1'b1);
-            8'h6A: rmw_core(OP_ROR, av, 1'b1);
-            8'h1A: rmw_core(OP_INC, av, 1'b1);
-            8'h3A: rmw_core(OP_DEC, av, 1'b1);
-            // ---- transfers (1 cycle) ----
-            8'hAA: ld_x(A);                          // TAX
-            8'hA8: ld_y(A);                          // TAY
-            8'h8A: ld_a(X);                          // TXA
-            8'h98: ld_a(Y);                          // TYA
-            8'hBA: ld_x(S);                          // TSX
-            8'h9A: S <= fE ? {8'h01, X[7:0]} : X;    // TXS
-            8'h9B: ld_y(X);                          // TXY
-            8'hBB: ld_x(Y);                          // TYX
-            8'h1B: S <= fE ? {8'h01, A[7:0]} : A;    // TCS
-            8'h3B: begin                             // TSC
-                A <= S; fN <= S[15]; fZ <= (S == 16'h0000);
+            9'h00A: rmw_core(OP_ASL, av, 1'b1);
+            9'h02A: rmw_core(OP_ROL, av, 1'b1);
+            9'h04A: rmw_core(OP_LSR, av, 1'b1);
+            9'h06A: rmw_core(OP_ROR, av, 1'b1);
+            9'h01A: rmw_core(OP_INC, av, 1'b1);
+            9'h03A: rmw_core(OP_DEC, av, 1'b1);
+            // ---- transfers (1 cycle): the whole source, as much as the
+            // destination holds; TCS/TCD/TSC/TDC always 16 bits ----
+            9'h0AA: ld_x(A);                         // TAX
+            9'h0A8: ld_y(A);                         // TAY
+            9'h08A: ld_a(X);                         // TXA
+            9'h098: ld_a(Y);                         // TYA
+            9'h0BA: ld_x({16'h0, S});                // TSX
+            9'h09A: S <= emu ? {8'h01, X[7:0]} : X[15:0];    // TXS
+            9'h09B: ld_y(X);                         // TXY
+            9'h0BB: ld_x(Y);                         // TYX
+            9'h01B: S <= emu ? {8'h01, A[7:0]} : A[15:0];    // TCS
+            9'h03B: begin                            // TSC
+                A[15:0] <= S; fN <= S[15]; fZ <= (S == 16'h0000);
             end
-            8'h5B: begin                             // TCD
-                D <= A; fN <= A[15]; fZ <= (A == 16'h0000);
+            9'h05B: begin                            // TCD
+                D <= A[15:0]; fN <= A[15]; fZ <= (A[15:0] == 16'h0000);
             end
-            8'h7B: begin                             // TDC
-                A <= D; fN <= D[15]; fZ <= (D == 16'h0000);
+            9'h07B: begin                            // TDC
+                A[15:0] <= D; fN <= D[15]; fZ <= (D == 16'h0000);
             end
             // ---- index inc/dec (1 cycle) ----
-            8'hE8: ld_x(X + 16'd1);                  // INX
-            8'hCA: ld_x(X - 16'd1);                  // DEX
-            8'hC8: ld_y(Y + 16'd1);                  // INY
-            8'h88: ld_y(Y - 16'd1);                  // DEY
+            9'h0E8: ld_x(X + 32'd1);                 // INX
+            9'h0CA: ld_x(X - 32'd1);                 // DEX
+            9'h0C8: ld_y(Y + 32'd1);                 // INY
+            9'h088: ld_y(Y - 32'd1);                 // DEY
             // ---- XBA / XCE (1 cycle) ----
-            8'hEB: begin                             // XBA
-                A <= {A[7:0], A[15:8]};
+            9'h0EB: begin                            // XBA
+                A[15:0] <= {A[7:0], A[15:8]};
                 fN <= A[15]; fZ <= (A[15:8] == 8'h00);
             end
-            8'hFB: begin                             // XCE
+            9'h0FB: begin                            // XCE: C and E8
                 fC <= fE; fE <= fC;
-                if (fC) begin                        // entering emulation
+                if (fE16 & fC) begin                 // entering emulation
                     fM <= 1'b1; fX <= 1'b1;
-                    X[15:8] <= 8'h00; Y[15:8] <= 8'h00;
+                    X[31:8] <= 24'h0; Y[31:8] <= 24'h0;
                     S[15:8] <= 8'h01;
                 end
             end
+            // ---- after the WDM prefix ----
+            9'h1FB: if (C832 != 0) begin             // XFE: C and E8, V and E16
+                fC <= fE; fE <= fC; fV <= fE16; fE16 <= fV;
+                if (fV & fC) begin                   // entering emulation
+                    fM <= 1'b1; fX <= 1'b1;
+                    X[31:8] <= 24'h0; Y[31:8] <= 24'h0;
+                    S[15:8] <= 8'h01;
+                end else if (fV) begin               // 65C816 native
+                    X[31:16] <= 16'h0; Y[31:16] <= 16'h0;
+                end
+            end
+            9'h1EB: if (XOPS != 0)                   // BSW: A's bytes reversed
+                case (aw)
+                W32:     ld_a({A[7:0], A[15:8], A[23:16], A[31:24]});
+                W16:     ld_a({16'h0, A[7:0], A[15:8]});
+                default: ld_a(A);
+                endcase
+            9'h1B0: xb <= 1'b0;                      // banked mode off
+            9'h1B1: xb <= 1'b1;                      // banked mode on
             default: ;
             endcase
         end
@@ -908,16 +1053,24 @@ module cpu_65c816 (
         end
     endtask
 
+    // 32-bit push (PHA/PHX/PHY in 65C832 native mode)
+    task push32(input [31:0] v);
+        begin
+            push_q <= v; push_n <= 3'd4; stk16 <= 1'b0;
+            post_push <= PP_FETCH; state <= S_PUSH;
+        end
+    endtask
+
     // stack pointer step (keeps page 1 in emulation mode, except for the
     // new 16-bit stack ops which step the full 16-bit S)
-    task s_dec; S <= (fE & ~stk16) ? {8'h01, S[7:0] - 8'd1} : S - 16'd1; endtask
-    task s_inc; S <= (fE & ~stk16) ? {8'h01, S[7:0] + 8'd1} : S + 16'd1; endtask
+    task s_dec; S <= (emu & ~stk16) ? {8'h01, S[7:0] - 8'd1} : S - 16'd1; endtask
+    task s_inc; S <= (emu & ~stk16) ? {8'h01, S[7:0] + 8'd1} : S + 16'd1; endtask
 
     // interrupt entry (hardware IRQ/NMI and BRK/COP).
     // pushed_pc: the PC value to push; brkbit: B for the pushed P byte.
     task int_entry(input [15:0] pushed_pc, input brkbit, input [15:0] v);
         begin
-            if (fE) begin
+            if (emu) begin
                 push_q <= {pushed_pc, pbyte(brkbit), 8'h00};
                 push_n <= 3'd3;
             end else begin
@@ -933,29 +1086,29 @@ module cpu_65c816 (
 
     // abort entry: restore the pre-instruction snapshot, then push the
     // snapshotted PBR/PC/P (opcode address, B=0) and vector through the ABORT
-    // vector (native $FFE8 / emulation $FFF8).
+    // vector (native $FFE8 / emulation $FFF8 / 65C832 native $FFD8).
     task abort_entry;
         reg [7:0] pb;
-        reg       e;
+        reg       e, w;
         begin
             // With snap_late set the snapshot of what an execute changes is
             // still being taken: those registers are right as they are.
             if (snap_late) begin
-                e  = fE;
+                e  = emu; w = n832;
                 pb = {fN, fV, e ? 1'b1 : fM, e ? 1'b0 : fX, fD, fI, fZ, fC};
             end else begin
-                e  = sfE;
+                e  = sfE & sfE16; w = (C832 != 0) & ~sfE16;
                 pb = {sfN, sfV, e ? 1'b1 : sfM, e ? 1'b0 : sfX,
                       sfD, sfI, sfZ, sfC};
                 A <= sA; X <= sX; Y <= sY; xb <= sxb; S <= sS; D <= sD;
                 fN <= sfN; fV <= sfV; fM <= sfM; fX <= sfX;
-                fZ <= sfZ; fC <= sfC; fE <= sfE;
+                fZ <= sfZ; fC <= sfC; fE <= sfE; fE16 <= sfE16;
             end
             DBR <= sDBR;
             if (e) begin push_q <= {sPC, pb, 8'h00}; push_n <= 3'd3; end
             else   begin push_q <= {sPBR, sPC, pb};  push_n <= 3'd4; end
             fI <= 1'b1; fD <= 1'b0; PBR <= 8'h00;
-            vec <= e ? 16'hFFF8 : 16'hFFE8;
+            vec <= e ? 16'hFFF8 : (w ? 16'hFFD8 : 16'hFFE8);
             post_push <= PP_VEC; stk16 <= 1'b0;
             abort_pend <= 1'b0;
             state <= S_PUSH;
@@ -980,15 +1133,15 @@ module cpu_65c816 (
         S_RDL, S_RDH:
                  begin vld = 1'b1; addr = taddr;  vda = 1'b1; mlb_n = (d_cls != CL_MW); end
         S_WRL:   begin vld = 1'b1; addr = taddr;  we = 1'b1; wdata = stval[7:0];  vda = 1'b1; end
-        S_WRH:   begin vld = 1'b1; addr = taddr;  we = 1'b1; wdata = stval[15:8]; vda = 1'b1; end
+        S_WRH:   begin vld = 1'b1; addr = taddr;  we = 1'b1; wdata = stval[8*rb +: 8]; vda = 1'b1; end
         S_WBL:   begin vld = 1'b1; addr = taddr;  we = 1'b1; wdata = rmw_r[7:0];  vda = 1'b1; mlb_n = 1'b0; end
-        S_WBH:   begin vld = 1'b1; addr = taddr;  we = 1'b1; wdata = tdata[15:8]; vda = 1'b1; mlb_n = 1'b0; end
+        S_WBH:   begin vld = 1'b1; addr = taddr;  we = 1'b1; wdata = tdata[8*rb +: 8]; vda = 1'b1; mlb_n = 1'b0; end
         S_PUSH:  begin vld = 1'b1; addr = sp_push; we = 1'b1; wdata = push_q[31:24]; vda = 1'b1; end
         S_PULL:  begin vld = 1'b1; addr = pa; vda = 1'b1; end
         S_VECL, S_VECH:
                  begin vld = 1'b1; addr = {8'h00, vec}; vda = 1'b1; vpb_n = 1'b0; end
-        S_MVR:   begin vld = 1'b1; addr = {tmid, X};            vda = 1'b1; end
-        S_MVW:   begin vld = 1'b1; addr = {DBR, Y}; we = 1'b1; wdata = tdata[7:0]; vda = 1'b1; end
+        S_MVR:   begin vld = 1'b1; addr = mv_s;                 vda = 1'b1; end
+        S_MVW:   begin vld = 1'b1; addr = mv_d; we = 1'b1; wdata = tdata[7:0]; vda = 1'b1; end
         default: ;
         endcase
         // suppress every write of an instruction being aborted (the abort
@@ -1010,8 +1163,34 @@ module cpu_65c816 (
                      (state == S_VECH) | (state == S_MVR)  | (state == S_MVW);
     wire cstep = ~needs_bus | (~fbusy & rdy);
     wire dstate_wr = (d_cls == CL_WR);
-    wire [15:0] int_vec = nmi_pend ? (fE ? 16'hFFFA : 16'hFFEA)
-                                   : (fE ? 16'hFFFE : 16'hFFEE);
+    wire [15:0] int_vec = nmi_pend ? (emu ? 16'hFFFA : n832 ? 16'hFFDA : 16'hFFEA)
+                                   : (emu ? 16'hFFFE : n832 ? 16'hFFDE : 16'hFFEE);
+
+    // The multiply / divide unit's one adder: x + y, or x - y (md_s).
+    reg [33:0] md_x, md_y;
+    reg        md_s;
+    always @* begin
+        md_x = {1'b0, md_h}; md_y = {2'b0, md_b}; md_s = 1'b0;   // MUL: h + b
+        case (md_ph)
+        P_LOOP:  if (md_dv) begin                                // DIV: 2h + bit - b
+                     md_x = {1'b0, md_h[31:0], md_l[31]}; md_s = 1'b1;
+                 end
+        P_NEGA:  begin md_x = 34'd0; md_y = {2'b0, md_a}; md_s = 1'b1; end
+        P_NEGB:  begin md_x = 34'd0; md_s = 1'b1; end
+        P_FIX1:  md_s = 1'b1;                                    // h - b
+        P_FIX2:  begin md_y = {2'b0, md_a}; md_s = 1'b1; end     // h - a
+        P_FIXQ:  begin md_x = 34'd0; md_y = {2'b0, md_l}; md_s = 1'b1; end
+        P_FIXR:  if (md_sx == md_sy) begin                       // -r
+                     md_x = 34'd0; md_y = {1'b0, md_h}; md_s = 1'b1;
+                 end else if (md_sy) md_s = 1'b1;                // r - b
+                 else begin                                      // b - r
+                     md_x = {2'b0, md_b}; md_y = {1'b0, md_h}; md_s = 1'b1;
+                 end
+        default: ;
+        endcase
+    end
+    wire [33:0] md_sum = md_x + (md_y ^ {34{md_s}}) + {33'd0, md_s};
+    wire [31:0] md_sw  = md_sum[31:0] & wmask(aw);               // at A's width
 
     // branch condition
     reg btake;
@@ -1030,27 +1209,31 @@ module cpu_65c816 (
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state <= S_VECL; vec <= 16'hFFFC;
-            fE <= 1'b1; fM <= 1'b1; fX <= 1'b1; fI <= 1'b1; fD <= 1'b0;
+            fE <= 1'b1; fE16 <= 1'b1; fM <= 1'b1; fX <= 1'b1; fI <= 1'b1; fD <= 1'b0;
             fC <= 1'b0; fZ <= 1'b0; fV <= 1'b0; fN <= 1'b0;
-            A <= 16'h0000; X <= 16'h0000; Y <= 16'h0000;
+            A <= 32'h0; X <= 32'h0; Y <= 32'h0;
             S <= 16'h01FF; D <= 16'h0000; DBR <= 8'h00; PBR <= 8'h00;
-            PC <= 16'h0000; IR <= 8'h00; xb <= 1'b0; sxb <= 1'b0;
+            PC <= 16'h0000; IR <= 8'h00; IRx <= 1'b0; xb <= 1'b0; sxb <= 1'b0;
             {d_mode, d_cls, d_op} <= dec(8'h00); d_len <= 2'd1;
             tlo <= 8'h00; tmid <= 8'h00; tptr <= 16'h0000;
             ptr_bank <= 8'h00; taddr <= 24'h0; wrap16 <= 1'b0;
-            tdata <= 16'h0000; push_q <= 32'h0; push_n <= 3'd0; stk16 <= 1'b0;
+            tdata <= 32'h0; push_q <= 32'h0; push_n <= 3'd0; stk16 <= 1'b0;
             post_push <= PP_FETCH; pull_idx <= 2'd0;
-            taddr_alt <= 24'h0; pa <= 24'h0;
+            taddr_alt <= 24'h0; pa <= 24'h0; rb <= 2'd0;
+            mv_s <= 24'h0; mv_d <= 24'h0;
+            md_ph <= P_INIT; md_h <= 33'h0; md_l <= 32'h0; md_a <= 32'h0;
+            md_b <= 32'h0; md_n <= 6'd0; md_sx <= 1'b0; md_sy <= 1'b0;
+            md_sg <= 1'b0; md_dv <= 1'b0; md_ov <= 1'b0;
             q <= 64'h0; qn <= 4'd0; fa <= 16'h0000; faddr <= 24'h0;
             fbusy <= 1'b0; fdrop <= 1'b0;
-            xp <= 1'b0; xm <= 16'h0000; snap_late <= 1'b0; lp <= 1'b0;
+            xp <= 1'b0; xm <= 32'h0; snap_late <= 1'b0; lp <= 1'b0;
             irq1 <= 1'b1; irq2 <= 1'b1; nmi1 <= 1'b1; nmi2 <= 1'b1;
             nmi_pend <= 1'b0;
             ab <= 1'b1; abort_pend <= 1'b0;
-            sA <= 16'h0; sX <= 16'h0; sY <= 16'h0; sS <= 16'h0;
+            sA <= 32'h0; sX <= 32'h0; sY <= 32'h0; sS <= 16'h0;
             sD <= 16'h0; sPC <= 16'h0; sDBR <= 8'h0; sPBR <= 8'h0;
             sfN<=1'b0; sfV<=1'b0; sfM<=1'b1; sfX<=1'b1;
-            sfD<=1'b0; sfI<=1'b1; sfZ<=1'b0; sfC<=1'b0; sfE<=1'b1;
+            sfD<=1'b0; sfI<=1'b1; sfZ<=1'b0; sfC<=1'b0; sfE<=1'b1; sfE16<=1'b1;
         end else begin
             // interrupt input synchronizers / NMI edge detect
             irq1 <= irq_n;
@@ -1061,7 +1244,7 @@ module cpu_65c816 (
             // abort synchronizer
             ab <= abort_n;
 
-            take = 2'd0; jmp = 1'b0; jpc = PC; jbank = PBR;
+            take = 3'd0; jmp = 1'b0; jpc = PC; jbank = PBR;
 
             if (cstep) begin
                 // Latch a recognized abort; the abort sequence in S_FETCH
@@ -1072,7 +1255,7 @@ module cpu_65c816 (
                 // The registers an execute changes, for the ABORT snapshot,
                 // after a fetch cycle that ran the previous one's execute.
                 if (snap_late) begin
-                    sA <= A; sX <= X; sY <= Y; sxb <= xb; sS <= S; sD <= D; sfE <= fE;
+                    sA <= A; sX <= X; sY <= Y; sxb <= xb; sS <= S; sD <= D; sfE <= fE; sfE16 <= fE16;
                     sfN<=fN; sfV<=fV; sfM<=fM; sfX<=fX;
                     sfD<=fD; sfI<=fI; sfZ<=fZ; sfC<=fC;
                     snap_late <= 1'b0;
@@ -1109,22 +1292,24 @@ module cpu_65c816 (
                         sPC <= PC; sPBR <= PBR;
                         sA <= A; sX <= X; sY <= Y; sS <= S; sD <= D; sDBR <= DBR; sxb <= xb;
                         sfN<=fN; sfV<=fV; sfM<=fM; sfX<=fX;
-                        sfD<=fD; sfI<=fI; sfZ<=fZ; sfC<=fC; sfE<=fE;
-                        PC <= PC + 16'd1; take = 2'd1;
+                        sfD<=fD; sfI<=fI; sfZ<=fZ; sfC<=fC; sfE<=fE; sfE16<=fE16;
+                        PC <= PC + 16'd1; take = 3'd1;
                         case (qb)
                         // ---- pulls / returns ----
                         8'h28, 8'h2B, 8'h68, 8'h7A, 8'hAB, 8'hFA,
                         8'h40, 8'h60, 8'h6B: begin
-                            IR <= qb; {d_mode, d_cls, d_op} <= dec_in;
+                            IR <= qb; IRx <= 1'b0; {d_mode, d_cls, d_op} <= dec_in;
                             pull_idx <= 2'd0; state <= S_PULL;
                             // The "new" pull instructions PLB/PLD/RTL use the
                             // 16-bit stack in emulation mode
                             stk16 <= pull16;
-                            pa <= (fE & ~pull16) ? {16'h0001, S[7:0] + 8'd1}
-                                                 : {dbank, S + 16'd1};
+                            pa <= (emu & ~pull16) ? {16'h0001, S[7:0] + 8'd1}
+                                                  : {dbank, S + 16'd1};
                         end
+                        // ---- the WDM prefix: the next byte is the opcode ----
+                        8'h42: state <= S_XOP;
                         default: begin
-                            IR <= qb; {d_mode, d_cls, d_op} <= dec_in;
+                            IR <= qb; IRx <= 1'b0; {d_mode, d_cls, d_op} <= dec_in;
                             d_len <= len_in;
                             if (fetch_local) lp <= 1'b1;         // implied
                             else if (fetch_setup) state <= S_IMP; // push, WAI, STP
@@ -1142,11 +1327,14 @@ module cpu_65c816 (
                     // ---- pushes ----
                     8'h08: push8(pbyte(1'b1));               // PHP
                     8'h0B: push16(D);                        // PHD
-                    8'h48: if (m16) push16(A); else push8(A[7:0]);  // PHA
+                    8'h48: if (a32) push32(A);               // PHA
+                           else if (m16) push16(A[15:0]); else push8(A[7:0]);
                     8'h4B: push8(PBR);                       // PHK
-                    8'h5A: if (x16) push16(Y); else push8(Y[7:0]);  // PHY
+                    8'h5A: if (x32) push32(Y);               // PHY
+                           else if (x16) push16(Y[15:0]); else push8(Y[7:0]);
                     8'h8B: push8(DBR);                       // PHB
-                    8'hDA: if (x16) push16(X); else push8(X[7:0]);  // PHX
+                    8'hDA: if (x32) push32(X);               // PHX
+                           else if (x16) push16(X[15:0]); else push8(X[7:0]);
                     8'hCB: state <= S_WAI;
                     8'hDB: state <= S_STP;
                     default: state <= S_FETCH;
@@ -1154,15 +1342,31 @@ module cpu_65c816 (
                 end
 
                 //----------------------------------------------------------
+                // The opcode after a WDM prefix, from the queue: one of the
+                // extension's (xdec_in), or implied (XFE, BSW, the banked
+                // mode, or a no-op). Not an instruction boundary: no
+                // interrupt here, and the ABORT snapshot is the prefix's.
+                S_XOP: if (qn != 4'd0) begin
+                    PC <= PC + 16'd1; take = 3'd1;
+                    IR <= qb; IRx <= 1'b1; {d_mode, d_cls, d_op} <= xdec_in;
+                    d_len <= xlen_in;
+                    if (ximp) begin lp <= 1'b1; state <= S_FETCH; end
+                    else state <= S_OPS;
+                end
+
+                //----------------------------------------------------------
                 // The operand bytes, taken together once all are queued: b1-b3
                 // from the head, PC at b1, pce past the instruction.
-                S_OPS: if (qn >= {2'd0, olen}) begin
+                S_OPS: if (qn >= {1'b0, olen}) begin
                     PC <= pce; take = olen;
-                    case (IR)
-                    8'h00: int_entry(pce, 1'b1, fE ? 16'hFFFE : 16'hFFE6); // BRK
-                    8'h02: int_entry(pce, 1'b1, fE ? 16'hFFF4 : 16'hFFE4); // COP
+                    // (an opcode after the prefix is never one of these)
+                    case (IRx ? 8'h01 : IR)
+                    8'h00: int_entry(pce, 1'b1, emu ? 16'hFFFE : n832 ? 16'hFFD6 : 16'hFFE6); // BRK
+                    8'h02: int_entry(pce, 1'b1, emu ? 16'hFFF4 : n832 ? 16'hFFD4 : 16'hFFE4); // COP
                     8'h44, 8'h54: begin                                    // MVP/MVN
                         DBR <= b1; tmid <= b2; state <= S_MVR;             // dest, src bank
+                        mv_s <= {b2, 16'h0} + {8'h0, X[23:0]};             // bank:0000 + X
+                        mv_d <= {b1, 16'h0} + {8'h0, Y[23:0]};
                     end
                     8'h62: push16(pce + {b2, b1});                         // PER
                     8'hF4: push16({b2, b1});                               // PEA
@@ -1181,7 +1385,7 @@ module cpu_65c816 (
                     8'hFC: begin                                           // JSR (abs,X)
                         push_q <= {pcn, 16'h0}; push_n <= 3'd2; stk16 <= 1'b0;
                         post_push <= PP_PTR;
-                        tptr <= {b2, b1} + X; ptr_bank <= PBR;
+                        tptr <= {b2, b1} + X[15:0]; ptr_bank <= PBR;
                         state <= S_PUSH;
                     end
                     8'h4C: begin jump({b2, b1}); state <= S_FETCH; end     // JMP abs
@@ -1190,7 +1394,7 @@ module cpu_65c816 (
                         state <= S_PTRL;
                     end
                     8'h7C: begin                                           // JMP (abs,X)
-                        tptr <= {b2, b1} + X; ptr_bank <= PBR;
+                        tptr <= {b2, b1} + X[15:0]; ptr_bank <= PBR;
                         state <= S_PTRL;
                     end
                     8'h5C: begin jumpl(b3, {b2, b1}); state <= S_FETCH; end // JML long
@@ -1206,8 +1410,10 @@ module cpu_65c816 (
                         state <= S_FETCH;
                     end
                     MD_IMM: begin
-                        xm <= rd16 ? {b2, b1} : {8'h00, b1}; xp <= 1'b1;
-                        state <= S_FETCH;
+                        xm <= (rw == W32) ? {b4, b3, b2, b1} :
+                              (rw == W16) ? {16'h0, b2, b1} : {24'h0, b1};
+                        if (d_md) begin md_ph <= P_INIT; state <= S_MD; end
+                        else begin xp <= 1'b1; state <= S_FETCH; end
                     end
                     // Direct-page modes: when E=1 and DL=0 the base offset
                     // (dp + index) wraps within page 0 with high byte = DH;
@@ -1222,13 +1428,13 @@ module cpu_65c816 (
                     end
                     MD_DPX: begin
                         taddr <= dpw ? {8'h00, D[15:8], b1 + X[7:0]}
-                                     : {dbank, dbase + {8'h00, b1} + X};
+                                     : {dbank, dbase + {8'h00, b1} + X[15:0]};
                         wrap16 <= 1'b1;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
                     MD_DPY: begin
                         taddr <= dpw ? {8'h00, D[15:8], b1 + Y[7:0]}
-                                     : {dbank, dbase + {8'h00, b1} + Y};
+                                     : {dbank, dbase + {8'h00, b1} + Y[15:0]};
                         wrap16 <= 1'b1;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
@@ -1239,7 +1445,7 @@ module cpu_65c816 (
                     end
                     MD_IDX: begin
                         tptr <= dpw ? {D[15:8], b1 + X[7:0]}
-                                    : dbase + {8'h00, b1} + X;
+                                    : dbase + {8'h00, b1} + X[15:0];
                         ptr_bank <= dbank;
                         state <= S_PTRL;
                     end
@@ -1258,16 +1464,16 @@ module cpu_65c816 (
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
                     MD_ABX: begin
-                        taddr <= {DBR, b2, b1} + {8'h00, X}; wrap16 <= 1'b0;
+                        taddr <= {DBR, b2, b1} + X[23:0]; wrap16 <= 1'b0;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
                     MD_ABY: begin
-                        taddr <= {DBR, b2, b1} + {8'h00, Y}; wrap16 <= 1'b0;
+                        taddr <= {DBR, b2, b1} + Y[23:0]; wrap16 <= 1'b0;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
                     default: begin                                         // ABL / ALX
                         taddr <= (d_mode == MD_ALX)
-                                 ? {b3, b2, b1} + {8'h00, X}
+                                 ? {b3, b2, b1} + X[23:0]
                                  : {b3, b2, b1};
                         wrap16 <= 1'b0;
                         state <= dstate_wr ? S_WRL : S_RDL;
@@ -1284,7 +1490,7 @@ module cpu_65c816 (
 
                 S_PTRH: begin
                     tptr <= tptr + 16'd1;
-                    case (IR)
+                    case (IRx ? 8'h01 : IR)
                     8'h6C, 8'h7C, 8'hFC:                                   // jumps via pointer
                         begin jump({rdata, tlo}); state <= S_FETCH; end
                     8'hD4: push16({rdata, tlo});                           // PEI
@@ -1292,7 +1498,7 @@ module cpu_65c816 (
                     default: case (d_mode)
                     MD_IDL, MD_ILY: begin tmid <= rdata; state <= S_PTRB; end
                     MD_IDY, MD_SRY: begin
-                        taddr <= {DBR, rdata, tlo} + {8'h00, Y}; wrap16 <= 1'b0;
+                        taddr <= {DBR, rdata, tlo} + Y[23:0]; wrap16 <= 1'b0;
                         state <= dstate_wr ? S_WRL : S_RDL;
                     end
                     default: begin                                         // IDX / IDP
@@ -1304,13 +1510,13 @@ module cpu_65c816 (
                 end
 
                 S_PTRB: begin
-                    case (IR)
+                    case (IRx ? 8'h01 : IR)
                     8'hDC: begin                                           // JML [abs]
                         jump({tmid, tlo}); PBR <= rdata; state <= S_FETCH;
                     end
                     default: begin                                         // IDL / ILY
                         taddr <= (d_mode == MD_ILY)
-                                 ? {rdata, tmid, tlo} + {8'h00, Y}
+                                 ? {rdata, tmid, tlo} + Y[23:0]
                                  : {rdata, tmid, tlo};
                         wrap16 <= 1'b0;
                         state <= dstate_wr ? S_WRL : S_RDL;
@@ -1320,43 +1526,47 @@ module cpu_65c816 (
 
                 //----------------------------------------------------------
                 // The data is latched (xm), not used: a read's execute runs
-                // in the next fetch cycle, an RMW's in S_WBL.
+                // in the next fetch cycle, an RMW's in S_WBL, a multiply's
+                // or divide's in S_MD. A wide operand's bytes follow in
+                // S_RDH (rb), low byte first.
                 S_RDL: begin
-                    if (rd16) begin
-                        tlo <= rdata;
-                        taddr <= taddr1; taddr_alt <= taddr;
+                    xm <= {24'h0, rdata};
+                    if (rw != W8) begin
+                        taddr <= taddr1; taddr_alt <= taddr; rb <= 2'd1;
                         state <= S_RDH;
-                    end else if (d_cls == CL_MW) begin
-                        xm <= {8'h00, rdata};
-                        state <= S_WBL;
-                    end else begin
-                        xm <= {8'h00, rdata}; xp <= 1'b1;
-                        state <= S_FETCH;
-                    end
+                    end else if (d_cls == CL_MW) state <= S_WBL;
+                    else if (d_md) begin md_ph <= P_INIT; state <= S_MD; end
+                    else begin xp <= 1'b1; state <= S_FETCH; end
                 end
 
                 S_RDH: begin
-                    xm <= {rdata, tlo};
-                    if (d_cls == CL_MW) begin
-                        taddr <= taddr_alt; taddr_alt <= taddr;
-                        state <= S_WBL;
-                    end else begin
-                        xp <= 1'b1;
-                        state <= S_FETCH;
-                    end
+                    xm[8*rb +: 8] <= rdata;
+                    if (rb != rlast) begin
+                        taddr <= taddr1; rb <= rb + 2'd1;
+                    end else if (d_cls == CL_MW) begin
+                        taddr <= taddr_alt; state <= S_WBL;
+                    end else if (d_md) begin md_ph <= P_INIT; state <= S_MD; end
+                    else begin xp <= 1'b1; state <= S_FETCH; end
                 end
 
+                // An RMW writes back low byte first, from its first address
                 S_WBL: begin
                     rmw_core(d_op, xm, 1'b0);
-                    if (rd16) begin taddr <= taddr_alt; state <= S_WBH; end
+                    if (rw != W8) begin taddr <= taddr1; rb <= 2'd1; state <= S_WBH; end
                     else state <= S_FETCH;
                 end
-                S_WBH: state <= S_FETCH;
+                S_WBH: begin
+                    if (rb != rlast) begin taddr <= taddr1; rb <= rb + 2'd1; end
+                    else state <= S_FETCH;
+                end
                 S_WRL: begin
-                    if (st16) begin taddr <= taddr1; state <= S_WRH; end
+                    if (sw != W8) begin taddr <= taddr1; rb <= 2'd1; state <= S_WRH; end
                     else state <= S_FETCH;
                 end
-                S_WRH: state <= S_FETCH;
+                S_WRH: begin
+                    if (rb != slast) begin taddr <= taddr1; rb <= rb + 2'd1; end
+                    else state <= S_FETCH;
+                end
 
                 //----------------------------------------------------------
                 S_PUSH: begin
@@ -1364,7 +1574,7 @@ module cpu_65c816 (
                     push_q <= push_q << 8;
                     push_n <= push_n - 3'd1;
                     if (push_n == 3'd1) begin
-                        if (fE & stk16) S[15:8] <= 8'h01;   // restore page 1
+                        if (emu & stk16) S[15:8] <= 8'h01;  // restore page 1
                         case (post_push)
                         PP_VEC:  state <= S_VECL;
                         PP_PTR:  state <= S_PTRL;
@@ -1375,15 +1585,16 @@ module cpu_65c816 (
 
                 S_PULL: begin
                     s_inc;
-                    pa <= (fE & ~stk16) ? {16'h0001, pa[7:0] + 8'd1}
-                                        : {pa[23:16], pa[15:0] + 16'd1};
+                    pa <= (emu & ~stk16) ? {16'h0001, pa[7:0] + 8'd1}
+                                         : {pa[23:16], pa[15:0] + 16'd1};
                     pull_idx <= pull_idx + 2'd1;
+                    tdata[8*pull_idx +: 8] <= rdata;                       // a wide pull's bytes
                     case (IR)
                     8'h28: begin set_p(rdata); state <= S_FETCH; end       // PLP
                     8'hAB: begin                                           // PLB
                         DBR <= rdata;
                         fN <= rdata[7]; fZ <= (rdata == 8'h00);
-                        if (fE) S[15:8] <= 8'h01;           // restore page 1
+                        if (emu) S[15:8] <= 8'h01;          // restore page 1
                         state <= S_FETCH;
                     end
                     8'h2B:                                                 // PLD
@@ -1391,24 +1602,22 @@ module cpu_65c816 (
                         else begin
                             D <= {rdata, tlo};
                             fN <= rdata[7]; fZ <= ({rdata, tlo} == 16'h0000);
-                            if (fE) S[15:8] <= 8'h01;       // restore page 1
+                            if (emu) S[15:8] <= 8'h01;      // restore page 1
                             state <= S_FETCH;
                         end
+                    // PLA, PLY, PLX: 1, 2 or 4 bytes, the last from the bus
                     8'h68:                                                 // PLA
-                        if (!m16) begin
-                            ld_a({8'h00, rdata}); state <= S_FETCH;
-                        end else if (pull_idx == 2'd0) tlo <= rdata;
-                        else begin ld_a({rdata, tlo}); state <= S_FETCH; end
+                        if (pull_idx == ((aw == W32) ? 2'd3 : {1'b0, aw == W16})) begin
+                            ld_a(pulled(aw)); state <= S_FETCH;
+                        end
                     8'h7A:                                                 // PLY
-                        if (!x16) begin
-                            ld_y({8'h00, rdata}); state <= S_FETCH;
-                        end else if (pull_idx == 2'd0) tlo <= rdata;
-                        else begin ld_y({rdata, tlo}); state <= S_FETCH; end
+                        if (pull_idx == ((xw == W32) ? 2'd3 : {1'b0, xw == W16})) begin
+                            ld_y(pulled(xw)); state <= S_FETCH;
+                        end
                     8'hFA:                                                 // PLX
-                        if (!x16) begin
-                            ld_x({8'h00, rdata}); state <= S_FETCH;
-                        end else if (pull_idx == 2'd0) tlo <= rdata;
-                        else begin ld_x({rdata, tlo}); state <= S_FETCH; end
+                        if (pull_idx == ((xw == W32) ? 2'd3 : {1'b0, xw == W16})) begin
+                            ld_x(pulled(xw)); state <= S_FETCH;
+                        end
                     8'h60:                                                 // RTS
                         if (pull_idx == 2'd0) tlo <= rdata;
                         else begin
@@ -1420,7 +1629,7 @@ module cpu_65c816 (
                         2'd1: jump({rdata, tlo} + 16'd1);
                         default: begin
                             PBR <= rdata;
-                            if (fE) S[15:8] <= 8'h01;       // restore page 1
+                            if (emu) S[15:8] <= 8'h01;      // restore page 1
                             state <= S_FETCH;
                         end
                         endcase
@@ -1430,7 +1639,7 @@ module cpu_65c816 (
                         2'd1: tlo <= rdata;
                         2'd2: begin
                             jump({rdata, tlo});
-                            if (fE) state <= S_FETCH;
+                            if (emu) state <= S_FETCH;
                         end
                         default: begin PBR <= rdata; state <= S_FETCH; end
                         endcase
@@ -1455,22 +1664,108 @@ module cpu_65c816 (
                 //   - interrupt pending: rewind PC by 3 onto the opcode so the
                 //     pushed PC re-enters the move, then let S_FETCH take it.
                 //   - otherwise: loop back to MVR for the next byte.
-                S_MVW: begin
-                    if (x16) begin
-                        X <= (IR == 8'h54) ? X + 16'd1 : X - 16'd1;
-                        Y <= (IR == 8'h54) ? Y + 16'd1 : Y - 16'd1;
-                    end else begin
-                        X <= {8'h00, (IR == 8'h54) ? X[7:0] + 8'd1 : X[7:0] - 8'd1};
-                        Y <= {8'h00, (IR == 8'h54) ? Y[7:0] + 8'd1 : Y[7:0] - 8'd1};
-                    end
-                    A <= A - 16'd1;
-                    if (A == 16'h0000)
+                // X and Y step at their width and the addresses follow them
+                // (bank:0000 + X); the count is A at its wide width, 16 bits
+                // or 32 (cw32).
+                S_MVW: begin : mvw
+                    reg [31:0] xn, yn;
+                    xn = mvstep(X, IR == 8'h54, xw);
+                    yn = mvstep(Y, IR == 8'h54, xw);
+                    X <= xn; Y <= yn;
+                    mv_s <= {tmid, 16'h0} + {8'h0, xn[23:0]};
+                    mv_d <= {DBR, 16'h0} + {8'h0, yn[23:0]};
+                    if (cw32) A <= A - 32'd1; else A[15:0] <= A[15:0] - 16'd1;
+                    if (cw32 ? (A == 32'h0) : (A[15:0] == 16'h0000))
                         state <= S_FETCH;
                     else if (intr) begin
                         jump(PC - 16'd3);
                         state <= S_FETCH;
                     end else
                         state <= S_MVR;
+                end
+
+                //----------------------------------------------------------
+                // MUL/UML/DIV/UDV of A (at its width) by the operand (xm),
+                // a bit a cycle. The product's low half or the quotient
+                // goes to A, the high half or the remainder to X.
+                S_MD: begin : md
+                    reg [32:0] t;
+                    reg [31:0] lo, hi;
+                    reg        nn;
+                    case (md_ph)
+                    P_INIT: begin
+                        md_sg <= (d_op == OP_MUL) | (d_op == OP_DIV);
+                        md_dv <= (d_op == OP_DIV) | (d_op == OP_UDV);
+                        md_sx <= ((d_op == OP_MUL) | (d_op == OP_DIV)) & topb(av, aw);
+                        md_sy <= ((d_op == OP_MUL) | (d_op == OP_DIV)) & topb(xm, aw);
+                        md_a <= av; md_b <= xm; md_h <= 33'h0; md_l <= av;
+                        md_n <= (aw == W32) ? 6'd32 : (aw == W16) ? 6'd16 : 6'd8;
+                        md_ov <= (d_op == OP_DIV) & (av == (wmask(aw) ^ (wmask(aw) >> 1)))
+                                                  & (xm == wmask(aw));
+                        if ((d_op == OP_MUL) | (d_op == OP_UML)) md_ph <= P_LOOP;
+                        else if (xm == 32'h0) begin                // by zero: V
+                            fV <= 1'b1; state <= S_FETCH;
+                        end else md_ph <= P_NEGA;
+                    end
+                    // DIV: the magnitudes, the dividend into md_l's top
+                    P_NEGA: begin
+                        if (md_sx) md_a <= md_sw;
+                        md_ph <= P_NEGB;
+                    end
+                    P_NEGB: begin
+                        if (md_sy) md_b <= md_sw;
+                        md_l <= md_a << ((aw == W32) ? 6'd0 : (aw == W16) ? 6'd16 : 6'd24);
+                        md_ph <= P_LOOP;
+                    end
+                    P_LOOP: begin
+                        if (md_dv) begin                         // restoring divide
+                            nn = ~md_sum[33];                    // 2h + bit >= b
+                            md_h <= nn ? md_sum[32:0] : {md_h[31:0], md_l[31]};
+                            md_l <= {md_l[30:0], nn};
+                        end else begin                           // shift and add
+                            t = md_l[0] ? md_sum[32:0] : md_h;
+                            md_h <= {1'b0, t[32:1]};
+                            md_l <= {t[0], md_l[31:1]};
+                        end
+                        md_n <= md_n - 6'd1;
+                        if (md_n == 6'd1)
+                            md_ph <= md_dv ? (md_sg ? P_FIXQ : P_DONE)
+                                           : (md_sg ? P_FIX1 : P_DONE);
+                    end
+                    // MUL: the high half less b if a < 0, and less a if b < 0
+                    P_FIX1: begin
+                        if (md_sx) md_h <= {1'b0, md_sw};
+                        md_ph <= P_FIX2;
+                    end
+                    P_FIX2: begin
+                        if (md_sy) md_h <= {1'b0, md_sw};
+                        md_ph <= P_DONE;
+                    end
+                    // DIV: rounded down. Signs alike: q, and r with the
+                    // dividend's sign. Unlike: -q if r = 0, else -q - 1 and
+                    // b - r, with the divisor's sign.
+                    P_FIXQ: begin
+                        if (md_sx != md_sy)
+                            md_l <= (md_h == 33'h0) ? md_sw : (~md_l & wmask(aw));
+                        md_ph <= P_FIXR;
+                    end
+                    P_FIXR: begin
+                        if ((md_sx == md_sy) ? md_sx : (md_h != 33'h0)) md_h <= {1'b0, md_sw};
+                        md_ph <= P_DONE;
+                    end
+                    default: begin                               // P_DONE
+                        if (md_dv) begin
+                            ld_a(md_l); wr_x(md_h[31:0]); fV <= md_ov;
+                        end else begin
+                            lo = (aw == W32) ? md_l : (aw == W16) ? {16'h0, md_l[31:16]}
+                                                                  : {24'h0, md_l[31:24]};
+                            hi = md_h[31:0] & wmask(aw);
+                            ld_a(lo); wr_x(hi);
+                            fV <= (hi != ((md_sg & topb(lo, aw)) ? wmask(aw) : 32'h0));
+                        end
+                        state <= S_FETCH;
+                    end
+                    endcase
                 end
 
                 //----------------------------------------------------------
@@ -1505,7 +1800,7 @@ module cpu_65c816 (
                 reg [31:0] fw;
                 reg        land, st_n, st_f;
                 qq = q >> {take, 3'b000};
-                qc = qn - {2'd0, take};
+                qc = qn - {1'b0, take};
                 if (r32) begin
                     fw = rdata32 >> {faddr[1:0], 3'b000};
                     nf = 3'd4 - {1'b0, faddr[1:0]};
@@ -1544,6 +1839,21 @@ module cpu_65c816 (
                     else
                         faddr <= {PBR, fa};
                 end
+            end
+
+            // A parameter of 0 holds its registers constant (these, the
+            // last assignments, win), so that synthesis drops them: the
+            // 65C832's upper halves, and the multiply/divide unit.
+            if (C832 == 0) begin
+                A[31:16] <= 16'h0; X[31:16] <= 16'h0; Y[31:16] <= 16'h0;
+                sA[31:16] <= 16'h0; sX[31:16] <= 16'h0; sY[31:16] <= 16'h0;
+                xm[31:16] <= 16'h0; tdata[31:16] <= 16'h0;
+                fE16 <= 1'b1; sfE16 <= 1'b1;
+            end
+            if (XOPS == 0) begin
+                md_ph <= P_INIT; md_h <= 33'h0; md_l <= 32'h0; md_a <= 32'h0;
+                md_b <= 32'h0; md_n <= 6'd0; md_sx <= 1'b0; md_sy <= 1'b0;
+                md_sg <= 1'b0; md_dv <= 1'b0; md_ov <= 1'b0;
             end
         end
     end

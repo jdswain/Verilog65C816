@@ -6,6 +6,14 @@ cycle does useful work: there are none of the dummy/phantom reads and writes
 of the real chip (or the 6502), and most instructions finish in fewer cycles
 than the original part.
 
+It is also a **65C832** ([docs/65C832.md](docs/65C832.md)): WDC's 32-bit
+member of the family, with a native mode whose accumulator and index
+registers are 32 bits, and an extension of its own behind the WDM prefix
+(multiply, divide, shifts and rotates by *n*, a byte swap). 65C816 code
+runs exactly as before. The whole 65C832 does not fit the Tang Nano 20K
+beside the rest of the SoC, so `fpga/` builds the core as a 65C816 with the
+extension (parameters `C832=0`, `XOPS=1`).
+
 ## Files
 
 | File | Description |
@@ -13,6 +21,7 @@ than the original part.
 | `cpu_65c816.v` | The CPU core (single module, no dependencies) |
 | `tb_cpu.v`     | Self-checking testbench (128 KB RAM, result/console/IRQ magic ports) |
 | `test_gen.py`  | Generates `test.hex`: a hand-assembled program with 64 self-checks |
+| `test832_gen.py` | Generates `test832.hex`: the 65C832 modes and the extension, directed and random self-checks (`make test832`); with `--c816`, `test816x.hex`, the same for the core as the Tang Nano builds it (`make test816x`) |
 | `tb_harte.v`   | Testbench that runs the SingleStepTests (TomHarte) vectors |
 | `harte_run.py` | Downloads, converts, runs and aggregates the TomHarte vectors |
 | `banked.s`     | Checks of the banked direct page and stack (`make banked`) |
@@ -24,7 +33,9 @@ than the original part.
 ```sh
 make run            # expects iverilog/vvp and python3 on PATH
 vvp sim +trace=200  # optional: print the first 200 bus cycles
-make banked         # the banked direct page and stack: PASS  (642 cycles)
+make banked         # the banked direct page and stack: PASS  (602 cycles)
+make test832        # the 65C832 and the WDM extension: PASS  (38728 cycles), 2506 checks
+make test816x       # the 65C816 and the extension (C832=0): PASS  (16006 cycles), 1139 checks
 make irqwait        # IRQs under wait states: the same checksum, the bus held (45 s)
 ```
 
@@ -37,7 +48,18 @@ IRQ/NMI, WAI/STP, and ABORT (write suppressed + instruction retried).
 ## Implemented features
 
 - All 256 opcodes (including MVN/MVP, BRL, JSL/RTL, stack-relative modes,
-  `[dp]`/`[dp],Y` long indirection, WDM as a 2-byte NOP).
+  `[dp]`/`[dp],Y` long indirection; WDM is the extension's prefix, and a
+  2-byte NOP with a byte the extension does not use).
+- **65C832 native mode** ([docs/65C832.md](docs/65C832.md)): the hidden
+  bits E16 and E8 (XCE exchanges C and E8, XFE C and E8 and V and E16), a
+  32-bit accumulator (E8 = 1) and 32-bit index registers, 4-byte
+  immediates, memory operands, pushes and pulls, 8-digit decimal, index
+  registers that reach all 16 MB, block moves past 64 KB, and the 65C832
+  vectors ($FFD4-$FFDF).
+- **The WDM extension**, in every mode and width: `MUL`/`UML` (X:A := A ×
+  M), `DIV`/`UDV` (A := quotient, X := remainder, rounded down) in all
+  fifteen addressing modes of the opcode after the prefix, `ASL`/`LSR`/
+  `ASR`/`ROL`/`ROR #n`, `BSW`.
 - Native and emulation modes; M/X width control with the proper register
   high-byte forcing (XH/YH cleared when x=1, SH forced to $01 when E=1).
 - Decimal mode ADC/SBC in both 8- and 16-bit widths.
@@ -148,7 +170,12 @@ final architectural state — every register (A/X/Y/S/D/PC/DBR/PBR/P/E) and
 every RAM byte the vector lists — not the per-cycle bus trace. It deposits the
 vector's initial state, runs one instruction to completion, and diffs.
 
-Result: **all opcodes pass except MVN/MVP** (see below). Getting there
+Result: **all opcodes pass except MVN/MVP** (see below), and, since some
+change after October 2026, one case of `e1.e` and 43 of `fc.e` (emulation
+mode: SBC (dp,X) and JSR (abs,X) pushing below page 1), still to look at.
+The 65C832 work changed none of it: 5,079,989 pass and 411 fail before and
+after. The WDM vectors list only the $42, so the byte after it reads 0, a
+no-operation; `make test832` checks the extension. Getting there
 required modelling several real-silicon behaviours that the vectors check:
 
 - **Decimal-mode flags** (65C816 semantics, not 6502): ADC takes N/Z from the

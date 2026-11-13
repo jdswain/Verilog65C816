@@ -10,6 +10,8 @@ __pycache__/
 /test.hex
 /banked.mem
 /banked.lst
+/test832.hex
+/test832.checks
 /harte/bin/
 
 # FPGA: Gowin output, built simulators, waveforms
@@ -32,3 +34,6 @@ impl/
 /fpga/apps/*.lst
 /irqwait.mem
 /sim_irqwait
+/sim816x
+/test816x.hex
+/test816x.checks

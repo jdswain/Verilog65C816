@@ -19,6 +19,25 @@ banked.mem: banked.s
 banked: sim banked.mem
 	$(VVP) sim +hex=banked.mem
 
+# the 65C832 modes and the WDM-prefixed extension (docs/65C832.md):
+# directed checks, then random MUL/DIV/shift/BSW cases against Python's
+test832.hex: test832_gen.py
+	python3 test832_gen.py > /dev/null
+
+test832: sim test832.hex
+	$(VVP) sim +hex=test832.hex +maxcyc=2000000
+
+# the same without the 65C832 modes, as the Tang Nano builds the core
+# (C832=0, XOPS=1: fpga/rtl/soc.v)
+sim816x: cpu_65c816.v tb_cpu.v
+	$(IVERILOG) -g2005 -Wall -Ptb_cpu.C832=0 -o $@ cpu_65c816.v tb_cpu.v
+
+test816x.hex: test832_gen.py
+	python3 test832_gen.py --c816 > /dev/null
+
+test816x: sim816x test816x.hex
+	$(VVP) sim816x +hex=test816x.hex +maxcyc=2000000
+
 # interrupts taken while the bus waits: each run's checksum must be the
 # reference's (no waits, no IRQ), with the bus contract kept
 irqwait.mem: irqwait.s
@@ -36,6 +55,7 @@ irqwait: sim_irqwait irqwait.mem
 	done; [ $$ok = 1 ] && echo "irqwait: ok" || { echo "irqwait: FAIL"; exit 1; }
 
 clean:
-	rm -f sim test.hex banked.mem sim_irqwait irqwait.mem
+	rm -f sim test.hex banked.mem sim_irqwait irqwait.mem test832.hex test832.checks \
+	      sim816x test816x.hex test816x.checks
 
-.PHONY: all run banked irqwait clean
+.PHONY: all run banked test832 test816x irqwait clean

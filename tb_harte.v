@@ -87,7 +87,7 @@ module tb_harte;
     wire [7:0] p_now = {dut.fN, dut.fV, dut.fM, dut.fX,
                         dut.fD, dut.fI, dut.fZ, dut.fC};
 
-    reg [1023:0] fname;
+    reg [8*1024-1:0] fname;
     integer ntests, t, i, cyc, pass, fail, nprint, maxprint, dummy;
     reg done, ok, ram_ok, started;
     reg [7:0] b;
@@ -146,6 +146,8 @@ module tb_harte;
                 dut.Y = i_p[4] ? {8'h00, i_y[7:0]} : i_y;
             end
             dut.xb = 1'b0;                     // banked mode off
+            dut.fE16 = 1'b1;                   // not 65C832 native (an XFE
+            dut.IRx = 1'b0;                    // in a WDM case may change it)
             dut.state = 5'd0;                 // S_FETCH
             dut.nmi_pend = 1'b0;
             dut.irq1 = 1'b1; dut.irq2 = 1'b1;

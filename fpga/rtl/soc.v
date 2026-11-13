@@ -231,7 +231,10 @@ module soc #(
     // in reset until the controller reports ready.
     wire cpu_rst_n = rst_n & sdram_init_done;
 
-    cpu_65c816 u_cpu (
+    // A 65C816 with the WDM extension (MUL/DIV, shifts by n, BSW). The full
+    // 65C832 (C832=1) does not fit the GW2AR-18 with the rest of the SoC:
+    // see docs/65C832.md.
+    cpu_65c816 #(.C832(0), .XOPS(1)) u_cpu (
         .clk(clk), .rst_n(cpu_rst_n),
         .addr(addr), .wdata(wdata), .rdata(rdata),
         .rdata32(rdata32), .r32(r32),

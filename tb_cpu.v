@@ -8,10 +8,16 @@
 // A write to $00F001 prints the byte as a character (debug console).
 // A write to $00F002 drives the IRQ line (1 = assert irq_n low).
 // A write to $00F003 pulses NMI low for a few cycles.
+// Writes to $00F006/$00F007 set a 16-bit detail printed with a failure
+// (test832: which random case). +maxcyc=N sets the timeout (200000).
+// C832 and XOPS pass through to the core (iverilog -Ptb_cpu.C832=0).
 //============================================================================
 `timescale 1ns/1ps
 
-module tb_cpu;
+module tb_cpu #(
+    parameter C832 = 1,
+    parameter XOPS = 1
+);
 
     reg clk = 1'b0;
     reg rst_n = 1'b0;
@@ -33,7 +39,7 @@ module tb_cpu;
     reg abort_line = 1'b1;
     reg [3:0] nmi_cnt = 4'd0;
 
-    cpu_65c816 dut (
+    cpu_65c816 #(.C832(C832), .XOPS(XOPS)) dut (
         .clk     (clk),
         .rst_n   (rst_n),
         .addr    (addr),
@@ -116,12 +122,15 @@ module tb_cpu;
         end
     end
 
+    reg [15:0] detail = 16'h0;
     always @(posedge clk) begin
         if (rst_n && vld && we) begin
             mem[addr[16:0]] <= wdata;
+            if (addr == 24'h00F006) detail[7:0]  <= wdata;
+            if (addr == 24'h00F007) detail[15:8] <= wdata;
             if (addr == 24'h00F000) begin
                 if (wdata != 8'h00)
-                    $display("FAIL: test %0d  (%0d cycles)", wdata, cycles);
+                    $display("FAIL: test %0d  detail %0d  (%0d cycles)", wdata, detail, cycles);
                 else if (!saw_vpb)
                     $display("FAIL: VPB (vector pull) never asserted");
                 else if (!saw_mlb)
@@ -148,8 +157,10 @@ module tb_cpu;
         rst_n <= 1'b1;
     end
 
+    integer maxcyc = 200000;
     initial begin
-        #2_000_000;
+        if ($value$plusargs("maxcyc=%d", maxcyc)) ;
+        #(maxcyc * 10);
         $display("TIMEOUT: no result written (PC stuck?)");
         $finish;
     end

@@ -49,7 +49,8 @@ loss for a process that owns a bank.
 The mode is off at reset, so code that uses D as a bank 0 address runs
 unchanged. MiniMon turns it on as it starts, so the operating system and
 anything run with `go` find it on (below). Every other WDM operand is
-still a two-byte no-operation. ($B0 and $B1 stay clear of 1, 2 and $FF,
+one of the extension's instructions ([65C832.md](65C832.md)) or a
+two-byte no-operation. ($B0 and $B1 stay clear of 1, 2 and $FF,
 which em16's own non-`-fpga` processor, EmCPU, uses for host I/O.) On a
 stock 65C816 the two WDMs do nothing, so code that depends on the mode is
 specific to this core.
