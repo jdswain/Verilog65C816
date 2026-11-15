@@ -21,7 +21,7 @@ extension (parameters `C832=0`, `XOPS=1`).
 | `cpu_65c816.v` | The CPU core (single module, no dependencies) |
 | `tb_cpu.v`     | Self-checking testbench (128 KB RAM, result/console/IRQ magic ports) |
 | `test_gen.py`  | Generates `test.hex`: a hand-assembled program with 64 self-checks |
-| `test832_gen.py` | Generates `test832.hex`: the 65C832 modes and the extension, directed and random self-checks (`make test832`); with `--c816`, `test816x.hex`, the same for the core as the Tang Nano builds it (`make test816x`) |
+| `test832_gen.py` | Generates `test832.hex`: the 65C832 modes and the extension, directed and random self-checks (`make test832`); with `--c816`, `test816x.hex`, the same for the core as the Tang Nano builds it (`make test816x`); with `--irq-only`, without the NMI and ABORT checks, for em16's EmCore (65Tools `em16/test/core832.sh`) |
 | `tb_harte.v`   | Testbench that runs the SingleStepTests (TomHarte) vectors |
 | `harte_run.py` | Downloads, converts, runs and aggregates the TomHarte vectors |
 | `banked.s`     | Checks of the banked direct page and stack (`make banked`) |
@@ -35,7 +35,7 @@ make run            # expects iverilog/vvp and python3 on PATH
 vvp sim +trace=200  # optional: print the first 200 bus cycles
 make banked         # the banked direct page and stack: PASS  (602 cycles)
 make test832        # the 65C832 and the WDM extension: PASS  (38728 cycles), 2506 checks
-make test816x       # the 65C816 and the extension (C832=0): PASS  (16006 cycles), 1139 checks
+make test816x       # the 65C816 and the extension (C832=0): PASS  (16006 cycles), 1140 checks
 make irqwait        # IRQs under wait states: the same checksum, the bus held (45 s)
 ```
 

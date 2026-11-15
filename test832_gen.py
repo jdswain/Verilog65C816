@@ -21,6 +21,10 @@ against Python's arithmetic.
 With --c816 it writes test816x.hex instead, for the core built as the Tang
 Nano builds it (C832=0, XOPS=1): the same checks without the 65C832 modes,
 and XFE checked to do nothing. make test816x runs it.
+
+With --irq-only it leaves out the checks of NMI and ABORT, for a bench
+that has only the IRQ line (em16's EmCore: the SoC wires neither). -o base
+names the files (base.hex, base.checks).
 """
 import random
 import sys
@@ -28,7 +32,10 @@ import sys
 random.seed(832)
 
 C816 = '--c816' in sys.argv[1:]
+IRQ_ONLY = '--irq-only' in sys.argv[1:]
 OUT = 'test816x' if C816 else 'test832'
+if '-o' in sys.argv[1:-1]:
+    OUT = sys.argv[sys.argv.index('-o') + 1]
 
 MEM_SIZE = 0x20000          # banks $00 and $01
 SRC = 0x1F000               # block move source, past part 2's code
@@ -574,9 +581,10 @@ else:
     db(0x64, 0x60); db(0x64, 0x64)                        # STZ $60, $64 (4 bytes each)
     db(0x00, 0xEA)                                        # BRK
     count(0x60, 1, '832: BRK through $FFD6')
-    SEP(0x20); LDA(1); STAa(0xF003); REP(0x20)            # NMI
-    NOP(); NOP(); NOP(); NOP()
-    count(0x62, 1, '832: NMI through $FFDA')
+    if not IRQ_ONLY:
+        SEP(0x20); LDA(1); STAa(0xF003); REP(0x20)        # NMI
+        NOP(); NOP(); NOP(); NOP()
+        count(0x62, 1, '832: NMI through $FFDA')
     CLI()
     for gap in range(4):                                  # IRQ just before a prefixed op
         SEP(0x20); LDA(1); STAa(0xF002); REP(0x20)
@@ -588,12 +596,13 @@ else:
     count(0x61, 4, '832: IRQ through $FFDE, four times')
 
     # ABORT of a prefixed instruction: it is retried from the $42
-    LDA(5)
-    STXa(0xF005)                                          # arm (4 bytes: $F005-8)
-    MDi('MUL', 3)                                         # aborted, then retried
-    CMP(15)
-    eq('832: ABORT of MUL #, retried')
-    count(0x65, 1, '832: ABORT through $FFD8')
+    if not IRQ_ONLY:
+        LDA(5)
+        STXa(0xF005)                                      # arm (4 bytes: $F005-8)
+        MDi('MUL', 3)                                     # aborted, then retried
+        CMP(15)
+        eq('832: ABORT of MUL #, retried')
+        count(0x65, 1, '832: ABORT through $FFD8')
 
     # back: XFE to 65C816 native, X and Y cut to 16 bits
     LDX(0x12345678)
